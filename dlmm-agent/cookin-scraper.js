@@ -189,7 +189,7 @@ function parseCookinData(text, mint) {
 
 // ─── Filter: return true jika LAYAK dibuka posisi ──────────────────────────
 export function passCookinFilter(data) {
-  if (!data) return true; // gagal scrape → jangan block
+  if (!data) return { pass: true, reasons: [] }; // gagal scrape → jangan block
 
   const reasons = [];
 
@@ -199,34 +199,38 @@ export function passCookinFilter(data) {
 
   // Hard reject kalau score rendah
   if (data.score !== null && data.score < 10)
-    reasons.push(`Score=${data.score} terlalu rendah`);
+    reasons.push(`Score=${data.score} rendah`);
 
   // Hard reject individual ekstrim
   if (data.dumpers !== null && data.dumpers > 50)
-    reasons.push(`Dumpers ${data.dumpers}% > 50%`);
+    reasons.push(`Dumpers=${data.dumpers}%`);
 
   if (data.bundle !== null && data.bundle > 70)
-    reasons.push(`Bundle ${data.bundle}% > 70%`);
+    reasons.push(`Bundle=${data.bundle}%`);
 
   if (data.dirty !== null && data.dirty > 80)
-    reasons.push(`Dirty ${data.dirty}% > 80%`);
+    reasons.push(`Dirty=${data.dirty}%`);
 
   if (data.bots !== null && data.bots > 75)
-    reasons.push(`Bots ${data.bots}% > 75%`);
+    reasons.push(`Bots=${data.bots}%`);
 
   if (data.holdUnder1min !== null && data.holdUnder1min > 85)
-    reasons.push(`Hold<1min ${data.holdUnder1min}% > 85%`);
+    reasons.push(`Hold<1min=${data.holdUnder1min}%`);
 
   if (data.pumpMet !== null && data.pumpMet === 0 && data.dumpMet !== null && data.dumpMet > 20)
-    reasons.push(`Pump=0 & Dump=${data.dumpMet} conditions`);
+    reasons.push(`Pump=0 & Dump=${data.dumpMet}`);
+
+  // HARAM ENTRY jika Sell Impact (Nuke) ratingnya bearish (merah / > 12%)
+  if (data.ratings && data.ratings.sellImpact && data.ratings.sellImpact.rating === 'bearish')
+    reasons.push(`Nuke(Sell Impact)=${data.ratings.sellImpact.val}% (Merah)`);
 
   if (reasons.length > 0) {
     console.log(`[Cookin] ❌ REJECT: ${reasons.join(' | ')}`);
-    return false;
+    return { pass: false, reasons };
   }
 
   console.log(`[Cookin] ✅ PASS — ${data.overallSignal}`);
-  return true;
+  return { pass: true, reasons: [] };
 }
 
 // ─── Format ringkas untuk Telegram ────────────────────────────────────────

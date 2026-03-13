@@ -36,7 +36,8 @@ export async function scanTokens() {
     scanned: 0,
     scannedTokens: [],
     passed: [],
-    rejected: { not_meteora: 0, no_pool: 0 },
+    rejected: { not_meteora: 0, no_pool: 0, cookin_reject: 0 },
+    cookinRejectDetails: [], // Menyimpan detail reject cookin
   };
 
   if (!fs.existsSync(GMGN_JSON_PATH)) {
@@ -154,8 +155,10 @@ export async function scanTokens() {
     if (cookin) {
       const cookinSummary = formatCookinSummary(cookin);
       console.log(cookinSummary.replace(/<[^>]+>/g, '')); // strip HTML tags untuk log
-      if (!passCookinFilter(cookin)) {
+      const check = passCookinFilter(cookin);
+      if (check.pass === false) {
         results.rejected.cookin_reject = (results.rejected.cookin_reject || 0) + 1;
+        results.cookinRejectDetails.push(`${symbol}: ${check.reasons.join(' | ')}`);
         continue;
       }
     } else {

@@ -6,7 +6,7 @@ import axios from 'axios';
 import { sendTelegram } from './telegram.js';
 import { scanTokens } from './scanner.js';
 import { openPosition, monitorPosition, claimFees, closePosition, swapTokenToSol, fetchJupiterPriceUsd, scanOrphanPositions, connection, wallet } from './meteora.js';
-import { formatCookinSummary } from './cookin-scraper.js';
+import { scrapeCookinToken, passCookinFilter, formatCookinSummary } from './cookin-scraper.js';
 
 const STATE_FILE = './state.json';
 const LOG_FILE = './trade_log.json';
@@ -347,13 +347,17 @@ async function runCycle() {
     return;
   }
 
-  const { scanned, scannedTokens = [], passed, rejected } = scanResult;
+  const { scanned, scannedTokens = [], passed, rejected, cookinRejectDetails = [] } = scanResult;
   console.log(`[Scan] Scanned: ${scanned} | Passed: ${passed.length}`);
 
   if (passed.length === 0) {
     const scannedList = scannedTokens.length
       ? scannedTokens.map((t) => `• ${t}`).join('\n')
       : '• (tidak ada data token)';
+
+    const cookinDetailsStr = cookinRejectDetails.length > 0
+      ? `\n<b>Detail Cookin Reject:</b>\n${cookinRejectDetails.map(d => `- ${d}`).join('\n')}`
+      : '';
 
     await sendTelegram(
       `🔍 <b>DLMM Scan #${cycleCount}</b>\n` +
@@ -364,7 +368,8 @@ async function runCycle() {
       `• Spike 1h: ${rejected.price_spike_1h || 0}\n` +
       `• No pool Meteora: ${rejected.no_pool || 0}\n` +
       `• Liq kecil: ${rejected.low_liquidity || 0}\n` +
-      `• Cookin reject: ${rejected.cookin_reject || 0}\n\n` +
+      `• Cookin reject: ${rejected.cookin_reject || 0}\n` +
+      `${cookinDetailsStr}\n\n` +
       `😴 Belum ada token cocok...`
     );
     return;
