@@ -34,6 +34,10 @@ export async function openPosition(token) {
   const activeBin = await dlmm.getActiveBin();
 
   const isSolX = pool.mintX === SOL_MINT;
+  const tokenDecimals = await getTokenDecimals(mint);
+  // DLMM activeBin.price default basis assumes SOL(9) vs token decimals;
+  // normalize to SOL per 1 token (human) for consistent display/PnL math.
+  const entryPrice = parseFloat(activeBin.price) * Math.pow(10, tokenDecimals - 9);
   const budgetLamports = Math.floor(BUDGET_SOL * 1e9);
   const amount70 = new BN(Math.floor(budgetLamports * 0.7));
   const amount30 = new BN(Math.floor(budgetLamports * 0.3));
@@ -71,7 +75,7 @@ export async function openPosition(token) {
     poolAddress: pool.address,
     mint,
     symbol,
-    entryPrice: parseFloat(activeBin.price),
+    entryPrice,
     entryBin: activeBin.binId,
     minBinId,
     maxBinId,
@@ -128,7 +132,10 @@ export async function monitorPosition(state) {
   const tokenDecimals = await getTokenDecimals(tokenMint);
   const tokenDivisor = Math.pow(10, tokenDecimals);
 
-  const currentPrice = parseFloat(activeBin.price); // SOL per 1 token (human-readable), sudah adjust decimal
+  // Normalize DLMM price to SOL per 1 token (human).
+  // Without this scale fix, token with 6 decimals appears 1000x terlalu besar.
+  const rawBinPrice = parseFloat(activeBin.price);
+  const currentPrice = rawBinPrice * Math.pow(10, tokenDecimals - 9);
   const inRange = activeBin.binId >= lowerBinId && activeBin.binId <= upperBinId;
 
   // feeX = token side (raw, pakai tokenDivisor)
@@ -175,6 +182,7 @@ export async function monitorPosition(state) {
     pnlSol: safePnlSol,
     pnlPct: safePnlPct,
     currentPrice,
+    rawBinPrice,
     activeBinId: activeBin.binId,
     tokenDecimals,
     dlmm,

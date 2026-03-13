@@ -61,6 +61,13 @@ function addKnownPool(poolAddress) {
 function fmtSol(n) { return typeof n === 'number' ? n.toFixed(4) : '0.0000'; }
 function fmtPct(n) { return (n >= 0 ? '+' : '') + n.toFixed(2) + '%'; }
 function fmtUsd(n) { return '$' + (n || 0).toLocaleString('en-US', { maximumFractionDigits: 0 }); }
+function fmtPrice(n) {
+  if (typeof n !== 'number' || !Number.isFinite(n)) return 'N/A';
+  const a = Math.abs(n);
+  if (a < 0.000001) return n.toFixed(12);
+  if (a < 0.001) return n.toFixed(10);
+  return n.toFixed(8);
+}
 
 function isAgentProcess(pid) {
   try {
@@ -325,7 +332,7 @@ async function runCycle() {
         `Token: <b>${pos_state.symbol}</b>\n` +
         `PnL: <b>${pnlText}</b>\n` +
         `Fee: ${fmtSol(totalFeeSol)} SOL\n` +
-        `Price: ${currentPrice.toFixed(8)}\n` +
+        `Price: ${fmtPrice(currentPrice)}\n` +
         `Status: ${inRange ? '✅ In Range' : `⚠️ OOR ${oorDir} (${outOfRangeMinutes.toFixed(0)}/${oorLimit}min)`}`
       );
     }
@@ -426,7 +433,7 @@ async function runCycle() {
     `🎯 <b>DLMM Position Opened!</b>\n` +
     `Token: <b>${posData.symbol}</b>\n` +
     `Pool: <code>${posData.poolAddress.slice(0, 20)}...</code>\n` +
-    `Entry price: <b>${posData.entryPrice.toFixed(8)}</b>\n` +
+    `Entry price: <b>${fmtPrice(posData.entryPrice)}</b>\n` +
     `Range: Bin ${posData.minBinId} → ${posData.maxBinId} (${Math.abs(posData.maxBinId - posData.minBinId)} bins)\n` +
     `Modal: <b>${posData.budgetSol} SOL</b>\n` +
     `Layer 1 (70% BidAsk): <a href="https://solscan.io/tx/${posData.txHash}">TX1</a>\n` +
