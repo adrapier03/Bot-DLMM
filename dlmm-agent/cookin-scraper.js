@@ -113,7 +113,7 @@ function parseCookinData(text, mint) {
   //  Dirty      | <50%         | 50-70%       | >70%
   //  Dumpers    | <25%         | 25-35%       | >35%
   //  Alpha      | >45%         | 30-45%       | <30%
-  //  In Profit  | <30%         | 30-50%       | >50%
+  //  In Profit  | >60%         | 40-60%       | <40%
   //  Top 10     | <30%         | 30-35%       | >35%
   //  Sell Impact| <10%         | 10-12%       | >12%
   // ──────────────────────────────────────────────────────────────────────
@@ -127,11 +127,11 @@ function parseCookinData(text, mint) {
       case 'dirty':
         rating = val < 50 ? 'bullish' : val <= 70 ? 'neutral' : 'bearish'; break;
       case 'dumpers':
-        rating = val < 25 ? 'bullish' : val <= 35 ? 'neutral' : 'bearish'; break;
+        rating = val < 40 ? 'bullish' : val <= 70 ? 'neutral' : 'bearish'; break;
       case 'alphaHands':
-        rating = val > 45 ? 'bullish' : val >= 30 ? 'neutral' : 'bearish'; break;
+        rating = val > 40 ? 'bullish' : val >= 25 ? 'neutral' : 'bearish'; break;
       case 'inProfit':
-        rating = val < 30 ? 'bullish' : val <= 50 ? 'neutral' : 'bearish'; break;
+        rating = val > 60 ? 'bullish' : val >= 40 ? 'neutral' : 'bearish'; break;
       case 'top10':
         rating = val < 30 ? 'bullish' : val <= 35 ? 'neutral' : 'bearish'; break;
       case 'sellImpact':
@@ -193,32 +193,14 @@ export function passCookinFilter(data) {
 
   const reasons = [];
 
-  // Harus minimal NEUTRAL-BULL (bearish max 2)
-  if (data.bearishCount > 2)
-    reasons.push(`Terlalu banyak bearish signals (${data.bearishCount}/7)`);
+  // Syarat utama: Harus maksimal 2 sinyal merah (bearish max 2)
+  if (data.bearishCount > 2) {
+    reasons.push(`Terlalu banyak bearish/merah (${data.bearishCount}/7)`);
+  }
 
-  // Hard reject individual ekstrim
-  if (data.dumpers !== null && data.dumpers > 50)
-    reasons.push(`Dumpers=${data.dumpers}%`);
-
-  if (data.bundle !== null && data.bundle > 70)
-    reasons.push(`Bundle=${data.bundle}%`);
-
-  if (data.dirty !== null && data.dirty > 80)
-    reasons.push(`Dirty=${data.dirty}%`);
-
-  if (data.bots !== null && data.bots > 75)
-    reasons.push(`Bots=${data.bots}%`);
-
-  if (data.holdUnder1min !== null && data.holdUnder1min > 85)
-    reasons.push(`Hold<1min=${data.holdUnder1min}%`);
-
-  if (data.pumpMet !== null && data.pumpMet === 0 && data.dumpMet !== null && data.dumpMet > 20)
-    reasons.push(`Pump=0 & Dump=${data.dumpMet}`);
-
-  // HARAM ENTRY jika Sell Impact (Nuke) ratingnya bearish (merah / > 12%)
-  if (data.ratings && data.ratings.sellImpact && data.ratings.sellImpact.rating === 'bearish')
-    reasons.push(`Nuke(Sell Impact)=${data.ratings.sellImpact.val}% (Merah)`);
+  // SEMUA HARD REJECT DISINI SUDAH DIMATIKAN SESUAI REQUEST
+  // Termasuk Bundle > 70%, Dumpers > 80%, dll 
+  // Sekarang murni ikut rule "minimal 3 merah baru reject"
 
   if (reasons.length > 0) {
     console.log(`[Cookin] ❌ REJECT: ${reasons.join(' | ')}`);
