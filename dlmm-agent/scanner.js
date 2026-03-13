@@ -1,0 +1,174 @@
+import fs from 'fs';
+import axios from 'axios';
+import dotenv from 'dotenv';
+dotenv.config();
+
+import { scrapeCookinToken, passCookinFilter, formatCookinSummary } from './cookin-scraper.js';
+
+const GMGN_JSON_PATH = process.env.GMGN_JSON_PATH;
+const SOL = 'So11111111111111111111111111111111111111112';
+
+// Filter dari .env
+const MIN_POOL_LIQUIDITY = parseFloat(process.env.MIN_POOL_LIQUIDITY || '50000');
+const MAX_PRICE_CHANGE_5M = parseFloat(process.env.MAX_PRICE_CHANGE_5M || '15');
+const MAX_PRICE_CHANGE_1H = parseFloat(process.env.MAX_PRICE_CHANGE_1H || '50');
+
+// Cache pairs — fetch ulang tiap 30 menit
+let pairsCache = null;
+let pairsCacheTime = 0;
+const CACHE_TTL_MS = 30 * 60 * 1000;
+
+async function getAllPairs() {
+  const now = Date.now();
+  if (pairsCache && (now - pairsCacheTime) < CACHE_TTL_MS) {
+    return pairsCache;
+  }
+  console.log('[Scanner] Fetching all Meteora pairs (cache refresh)...');
+  const res = await axios.get('https://dlmm-api.meteora.ag/pair/all', { timeout: 30000 });
+  pairsCache = Array.isArray(res.data) ? res.data : [];
+  pairsCacheTime = now;
+  console.log(`[Scanner] Cached ${pairsCache.length} pairs`);
+  return pairsCache;
+}
+
+export async function scanTokens() {
+  const results = {
+    scanned: 0,
+    scannedTokens: [],
+    passed: [],
+    rejected: { not_meteora: 0, no_pool: 0 },
+  };
+
+  if (!fs.existsSync(GMGN_JSON_PATH)) {
+    console.log('[Scanner] GMGN JSON not found:', GMGN_JSON_PATH);
+    return results;
+  }
+
+  let raw;
+  try {
+    raw = JSON.parse(fs.readFileSync(GMGN_JSON_PATH, 'utf8'));
+  } catch (e) {
+    console.error('[Scanner] Failed to parse GMGN JSON:', e.message);
+    return results;
+  }
+
+  const tokens = Array.isArray(raw) ? raw : (raw.data?.rank || raw.tokens || raw.items || null);
+  if (!tokens || tokens.length === 0) {
+    console.log('[Scanner] No tokens in JSON (rank is null or empty)');
+    return results;
+  }
+  results.scanned = tokens.length;
+
+  // Fetch/load pairs cache sekali untuk semua token di cycle ini
+  let allPairs;
+  try {
+    allPairs = await getAllPairs();
+  } catch (e) {
+    console.error('[Scanner] Failed to fetch pairs:', e.message);
+    return results;
+  }
+
+  const fmtUsd = (n) => {
+    if (!n || isNaN(n)) return '$0';
+    if (n >= 1e6) return `$${(n/1e6).toFixed(2)}M`;
+    if (n >= 1e3) return `$${(n/1e3).toFixed(1)}K`;
+    return `$${n.toFixed(0)}`;
+  };
+
+  const separator = '─'.repeat(55);
+  let idx = 0;
+
+  for (const token of tokens) {
+    idx++;
+    const mint = token.address || token.mint || token.token_address;
+    const symbol = token.symbol || token.name || mint?.slice(0, 8);
+    results.scannedTokens.push(`${symbol}${mint ? ` (${mint.slice(0, 6)}...)` : ''}`);
+    const mc = parseFloat(token.market_cap || token.mc || 0);
+    const vol = parseFloat(token.volume || token.volume_5m || 0);
+    const priceChange5m = parseFloat(token.price_change_percent5m || 0);
+    const priceChange1h = parseFloat(token.price_change_percent1h || 0);
+    const price = parseFloat(token.price || 0);
+
+    console.log(`\n${separator}`);
+    console.log(`[Scanner #${idx}] ${symbol} | ${mint?.slice(0,20)}...`);
+    console.log(`  Price   : $${price.toFixed(8)}`);
+    console.log(`  MC      : ${fmtUsd(mc)}`);
+    console.log(`  Vol 5m  : ${fmtUsd(vol)}`);
+    console.log(`  Δ5m     : ${priceChange5m >= 0 ? '+' : ''}${priceChange5m.toFixed(2)}% (max: ±${MAX_PRICE_CHANGE_5M}%)`);
+    console.log(`  Δ1h     : ${priceChange1h >= 0 ? '+' : ''}${priceChange1h.toFixed(2)}% (max: ±${MAX_PRICE_CHANGE_1H}%)`);
+
+    if (!mint) { console.log(`  ❌ REJECT: mint address tidak ada`); continue; }
+
+    // Filter price change 5m
+    if (Math.abs(priceChange5m) > MAX_PRICE_CHANGE_5M) {
+      console.log(`  ❌ REJECT: Price spike 5m terlalu besar (${priceChange5m.toFixed(2)}%, max ±${MAX_PRICE_CHANGE_5M}%)`);
+      results.rejected.price_spike = (results.rejected.price_spike || 0) + 1;
+      continue;
+    }
+
+    // Filter price change 1h
+    if (Math.abs(priceChange1h) > MAX_PRICE_CHANGE_1H) {
+      console.log(`  ❌ REJECT: Price spike 1h terlalu besar (${priceChange1h.toFixed(2)}%, max ±${MAX_PRICE_CHANGE_1H}%)`);
+      results.rejected.price_spike_1h = (results.rejected.price_spike_1h || 0) + 1;
+      continue;
+    }
+
+    // Cari pool Meteora
+    const matched = allPairs.filter(p =>
+      (p.mint_x === mint || p.mint_y === mint) &&
+      (p.mint_x === SOL || p.mint_y === SOL)
+    );
+
+    if (matched.length === 0) {
+      console.log(`  ❌ REJECT: Tidak ada pool SOL di Meteora DLMM`);
+      results.rejected.no_pool++;
+      continue;
+    }
+
+    matched.sort((a, b) => parseFloat(b.liquidity || 0) - parseFloat(a.liquidity || 0));
+    const best = matched[0];
+
+    const pool = {
+      address: best.address,
+      liquidity: parseFloat(best.liquidity || 0),
+      apr: parseFloat(best.apr || 0),
+      fees24h: parseFloat(best.fees_24h || 0),
+      mintX: best.mint_x,
+      mintY: best.mint_y,
+    };
+
+    console.log(`  Pool    : ${pool.address}`);
+    console.log(`  Liq     : ${fmtUsd(pool.liquidity)} (min: ${fmtUsd(MIN_POOL_LIQUIDITY)}) | APR: ${pool.apr.toFixed(1)}% | Fee24h: ${fmtUsd(pool.fees24h)}`);
+
+    // Filter liquidity
+    if (pool.liquidity < MIN_POOL_LIQUIDITY) {
+      console.log(`  ❌ REJECT: Liquidity terlalu kecil (${fmtUsd(pool.liquidity)} < ${fmtUsd(MIN_POOL_LIQUIDITY)})`);
+      results.rejected.low_liquidity = (results.rejected.low_liquidity || 0) + 1;
+      continue;
+    }
+
+    console.log(`  ✅ LOLOS filter GMGN+Meteora — cek Cookin.fun...`);
+
+    // ── Cookin.fun behavioral filter ──
+    const cookin = await scrapeCookinToken(mint);
+    if (cookin) {
+      const cookinSummary = formatCookinSummary(cookin);
+      console.log(cookinSummary.replace(/<[^>]+>/g, '')); // strip HTML tags untuk log
+      if (!passCookinFilter(cookin)) {
+        results.rejected.cookin_reject = (results.rejected.cookin_reject || 0) + 1;
+        continue;
+      }
+    } else {
+      console.log(`  ⚠️ Cookin.fun scrape gagal — lanjut tanpa filter cookin`);
+    }
+
+    console.log(`  ✅ LOLOS semua filter — masuk kandidat!`);
+    results.passed.push({ mint, symbol, mc, vol, pool, cookin });
+  }
+
+  console.log(`\n${separator}`);
+  console.log(`[Scanner] Hasil: ${results.scanned} scanned | ${results.passed.length} lolos | rejected: Spike5m=${results.rejected.price_spike||0} Spike1h=${results.rejected.price_spike_1h||0} NoPool=${results.rejected.no_pool||0} LowLiq=${results.rejected.low_liquidity||0} Cookin=${results.rejected.cookin_reject||0}`);
+  console.log(separator);
+
+  return results;
+}

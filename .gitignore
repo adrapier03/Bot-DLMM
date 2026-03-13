@@ -1,0 +1,54 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Secrets / env
+**/.env
+**/.env.*
+!.env.example
+
+# Dependencies
+**/node_modules/
+
+# Logs
+*.log
+logs/
+**/*.log
+
+# Runtime / PID
+*.pid
+*.pid.lock
+**/*.pid
+
+# Build / cache
+dist/
+build/
+.cache/
+.tmp/
+tmp/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Bot runtime data (private / generated)
+dlmm-agent/state.json
+dlmm-agent/trade_log.json
+dlmm-agent/known_pools.json
+dlmm-agent/agent.pid
+dlmm-agent/agent.log
+
+gmgn-script/gmgn_api_response.json
+gmgn-script/gmgn_bot.pid
+gmgn-script/gmgn_bot.log
+
+# Sensitive keys / wallets
+**/wallet.json
+*.key
+*.pem
+*.secret
