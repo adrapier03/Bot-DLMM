@@ -104,15 +104,29 @@ function ensureSingleInstance() {
 }
 
 // ─── VOLUME CHECK ─────────────────────────────────────────────
-async function fetchVol5m(poolAddress) {
+// ─── VOLUME FETCH ────────────────────────────────────────────────
+async function fetchVol5m(tokenMint) {
   try {
-    const url = `https://api.dexscreener.com/latest/dex/pairs/solana/${poolAddress}`;
+    const url = `https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`;
     const res = await axios.get(url, { timeout: 8000 });
-    const pair = res.data?.pair || res.data?.pairs?.[0];
-    const volUSD = pair?.volume?.m5;
+    const pairs = res.data?.pairs || [];
+    
+    if (pairs.length === 0) return 0; // Token beneran mati/gak ada pair aktif
 
-    return typeof volUSD === 'number' ? volUSD : null;
+    // Totalkan volume dari semua pair yang ada untuk token ini (Raydium, Meteora, dll)
+    let totalVol5m = 0;
+    for (const p of pairs) {
+      if (p.chainId === 'solana' && p.volume && typeof p.volume.m5 === 'number') {
+        totalVol5m += p.volume.m5;
+      }
+    }
+
+    return totalVol5m;
   } catch (e) {
+    if (e.response && e.response.status === 429) {
+      console.error('[VolCheck] Rate limit 429 hit');
+      return null; // Asli error limit
+    }
     console.error('[VolCheck] Fetch error:', e.message);
     return null;
   }
@@ -278,7 +292,7 @@ async function runCycle() {
     }
 
     // ── VOLUME HEALTH CHECK
-    const vol5m = await fetchVol5m(pos_state.poolAddress);
+    const vol5m = await fetchVol5m(pos_state.mint);
     console.log(`  Vol5m: ${vol5m !== null ? fmtUsd(vol5m) : 'N/A'} (threshold: ${fmtUsd(VOL_DRY_THRESHOLD_USD)})`);
 
     // vol5m null = fetch gagal (429/timeout). SKIP perhitungan cycle biar ga panik.
