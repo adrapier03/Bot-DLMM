@@ -47,7 +47,10 @@ Project ini menggabungkan 2 komponen dalam **1 folder**:
   - Spike 1h
   - Pool tersedia / no pool
   - Minimum liquidity pool
-  - Cookin.fun behavioral filter
+  - Cookin.fun behavioral filter:
+    - Sinyal bearish maksimal 2 metrik (jika >= 3 otomatis tertolak)
+    - Sell Impact (Nuke) tidak boleh merah (> 12%)
+    - Syarat ketat lain: Score >= 10, Limit Dumpers, dll.
 - Hasil scan:
   - `passed[]` kandidat untuk dieksekusi
   - `rejected` counter alasan reject

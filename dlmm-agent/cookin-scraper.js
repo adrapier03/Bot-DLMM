@@ -193,8 +193,8 @@ export function passCookinFilter(data) {
 
   const reasons = [];
 
-  // Harus minimal NEUTRAL-BULL (bearish < 4)
-  if (data.bearishCount >= 4)
+  // Harus minimal NEUTRAL-BULL (bearish max 2)
+  if (data.bearishCount > 2)
     reasons.push(`Terlalu banyak bearish signals (${data.bearishCount}/7)`);
 
   // Hard reject kalau score rendah
