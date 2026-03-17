@@ -12,20 +12,25 @@ Project ini menggabungkan 2 komponen dalam **1 folder**:
 ```bash
 /root/solana-dlmm-project
 ├── gmgn-script/
-│   ├── gmgn.py
-│   ├── gmgn_api_response.json
-│   └── gmgn_bot.log
+│   ├── gmgn.py                  # scraper GMGN via Playwright
+│   ├── gmgn_api_response.json   # output token list
+│   ├── gmgn_bot.log
+│   └── restart.sh
 └── dlmm-agent/
-    ├── agent.js
-    ├── scanner.js
-    ├── meteora.js
-    ├── cookin-scraper.js
-    ├── .env
-    ├── state.json
-    ├── trade_log.json
-    ├── known_pools.json
-    ├── agent.log
-    └── scripts/restart.sh
+    ├── agent.js                 # main orchestrator (scan + monitor + close)
+    ├── scanner.js               # filter token dari JSON GMGN + Meteora
+    ├── meteora.js               # open/monitor/close posisi DLMM + Jupiter swap
+    ├── cookin-scraper.js        # behavioral filter via cookin.fun
+    ├── gmgn-top-traders.js      # scrape top 10 holders → support level
+    ├── telegram.js              # module kirim notifikasi Telegram
+    ├── close-token-accounts.js  # utility close token accounts manual
+    ├── .env                     # konfigurasi semua parameter
+    ├── state.json               # state posisi aktif
+    ├── trade_log.json           # histori semua trade
+    ├── known_pools.json         # cache pool yang pernah dipakai (orphan check)
+    ├── agent.log                # log runtime
+    ├── agent.pid                # PID guard single instance
+    └── scripts/restart.sh       # restart bot dengan bersih
 ```
 
 ---
@@ -41,16 +46,17 @@ Project ini menggabungkan 2 komponen dalam **1 folder**:
 ### 2) DLMM Scanner (`dlmm-agent/scanner.js`)
 - Baca `GMGN_JSON_PATH` dari `.env`.
 - Parse token list dari JSON GMGN.
-- Cari pair Meteora DLMM yang match token + SOL.
+- Cari pair Meteora DLMM yang match token + SOL (pakai cache 30 menit).
 - Terapkan filter aktif:
-  - Spike 5m
-  - Spike 1h
-  - Pool tersedia / no pool
-  - Minimum liquidity pool
-  - Cookin.fun behavioral filter:
-    - Sinyal bearish maksimal 2 metrik (jika >= 3 otomatis tertolak)
-    - Sell Impact (Nuke) tidak boleh merah (> 12%)
-    - Syarat ketat lain: Limit Dumpers (< 50%), Limit Bundle (< 70%), dll.
+  - **Pool tersedia** → wajib ada pair SOL di Meteora DLMM
+  - **Cookin.fun behavioral filter** → reject jika bearish count **> 2** dari 7 metrik:
+    - Bundle, Dirty, Dumpers, AlphaHands, InProfit, Top10, SellImpact
+- Filter yang sudah **DINONAKTIFKAN** (commented out di code):
+  - ~~Spike 5m~~ (MAX_PRICE_CHANGE_5M)
+  - ~~Spike 1h~~ (MAX_PRICE_CHANGE_1H)
+  - ~~Minimum liquidity pool~~ (MIN_POOL_LIQUIDITY)
+  - ~~Hard reject individual Cookin~~ (bundle > 70%, dumpers > 80%, dll)
+  - **MC filter** → reject jika MC ≥ `MAX_MC_USD` (default **$2.000.000**)
 - Hasil scan:
   - `passed[]` kandidat untuk dieksekusi
   - `rejected` counter alasan reject
@@ -60,18 +66,72 @@ Project ini menggabungkan 2 komponen dalam **1 folder**:
 
 ### 3) DLMM Executor (`dlmm-agent/agent.js`)
 - Jika belum ada posisi aktif:
-  - pilih kandidat terbaik
-  - buka posisi DLMM
+  - pilih kandidat terbaik (sort by volume tertinggi)
+  - buka posisi DLMM dengan 2 layer:
+    - Layer 1: 70% modal → strategi **BidAsk**
+    - Layer 2: 30% modal → strategi **Spot**
   - simpan state ke `state.json`
+  - background scrape GMGN top 10 holders → hitung **Support Level** (weighted avg buy price)
 - Jika ada posisi aktif:
-  - monitor PnL + fee (basis nilai on-chain Meteora; bukan estimasi token price Jupiter)
-  - cek in-range / out-of-range
-  - auto close kalau TP/OOR/volume-dry condition terpenuhi
-  - Catatan: STOP LOSS saat ini di-disable sementara (untuk hindari false-trigger PnL)
-  - opsional swap token ke SOL
+  - **Monitor Tick** (tiap `MONITOR_INTERVAL_SEC`, default 2 detik): cek PnL realtime, trigger TP/SL/OOR
+  - **Cycle** (tiap `CYCLE_INTERVAL_SEC`, default 60 detik): cek volume, TVL, kirim status Telegram
+  - PnL diambil dari **Meteora datapi** (cocok sama angka di UI Meteora) — bukan estimasi lokal
+  - opsional swap token sisa ke SOL via Jupiter Ultra API setelah close
 - Kirim update ke Telegram (start, scan, open, status, close, crash).
 
-### 4) Orphan Position Safety
+### 4) Support Level (`dlmm-agent/gmgn-top-traders.js`)
+- Setelah posisi dibuka, bot scrape GMGN top 10 holders token tersebut
+- Hitung **weighted average buy price** berdasarkan % kepemilikan tiap holder
+- Dijadikan acuan Stop Loss utama (menggantikan SL %)
+- Disimpan ke `state.json` → digunakan di monitor tick
+
+### 5) Kondisi Close Posisi (Auto-Close Triggers)
+
+Bot punya **7 kondisi** yang bisa trigger close otomatis. Dicek di 2 tempat berbeda:
+
+**Monitor Tick** (tiap `MONITOR_INTERVAL_SEC` = 2 detik) — realtime:
+
+| Kondisi | Trigger | Nilai Aktif (.env) | Keterangan |
+|---|---|---|---|
+| 🔻 `SUPPORT_BROKEN` | Harga < avg buy top 10 holders & PnL minus | Dinamis (hasil scrape GMGN) | **SL utama** — menggantikan SL % jika data tersedia |
+| 🛑 `STOP_LOSS` | PnL ≤ -N% | `STOP_LOSS_PCT=10` → **-10%** | **Fallback only** — hanya aktif jika support level tidak ada |
+| 🎉 `TAKE_PROFIT` | PnL ≥ +N% | `TAKE_PROFIT_PCT=2` → **+2%** | Langsung close begitu nyentuh angka ini |
+| 📈 `OOR_ABOVE` | Harga pump keluar range atas > N menit | `OOR_ABOVE_LIMIT_MIN=5` → **5 menit** | Cek volume dulu sebelum close — jika volume masih deres → **re-open** di range baru |
+
+**Logic OOR Above detail:**
+```
+OOR Above > 5 menit
+    ↓
+Cek volume 5m token
+    ↓
+Vol >= OOR_ABOVE_REOPEN_VOL_USD ($30K) DAN reopenCount < OOR_ABOVE_MAX_REOPEN (2)?
+    ├── YA → close posisi lama → swap sisa token → re-open di active bin baru (sama seperti open biasa)
+    └── TIDAK → close total, scan token baru
+```
+
+> Env vars terkait: `OOR_ABOVE_REOPEN_VOL_USD=30000` (threshold vol re-open) | `OOR_ABOVE_MAX_REOPEN=2` (max re-open berturut, safety limit)
+| 📉 `OOR_BELOW` | Harga dump keluar range bawah > N menit | `OOR_BELOW_LIMIT_MIN=20` → **20 menit** | Lebih toleran dari OOR_ABOVE karena dump kadang reversal |
+
+**Run Cycle** (tiap `CYCLE_INTERVAL_SEC` = 60 detik) — per siklus:
+
+| Kondisi | Trigger | Nilai Aktif (.env) | Keterangan |
+|---|---|---|---|
+| 🌵 `VOL_DRY` | Vol 5m < threshold selama N cycle berturut | `VOL_DRY_THRESHOLD_USD=15000`, `VOL_DRY_CYCLES=6` → **< $15K selama 6 menit** | Counter reset jika volume recover. Alert Telegram dikirim di cycle pertama |
+| 🏊 `TVL_DILUTED` | TVL pool ≥ threshold setelah hold N menit | `TVL_DILUTED_THRESHOLD_USD=60000`, `TVL_DILUTED_MIN_HOLD_MIN=45` → **> $60K setelah 45 menit** | TVL membengkak = fee makin encer karena LP lain masuk banyak |
+
+**Urutan prioritas check di Monitor Tick:**
+```
+SUPPORT_BROKEN → STOP_LOSS (fallback) → TAKE_PROFIT → OOR timeout
+```
+
+**Urutan prioritas check di Run Cycle:**
+```
+VOL_DRY → TVL_DILUTED → (Telegram status update)
+```
+
+---
+
+### 6) Orphan Position Safety
 - Secara periodik cek posisi orphan (posisi ada di chain tapi tidak ke-track state lokal).
 - Jika ketemu orphan, bot coba close otomatis.
 

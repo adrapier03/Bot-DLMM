@@ -7,6 +7,7 @@ import { sendTelegram } from './telegram.js';
 import { scanTokens } from './scanner.js';
 import { openPosition, monitorPosition, claimFees, closePosition, swapTokenToSol, fetchJupiterPriceUsd, scanOrphanPositions, connection, wallet } from './meteora.js';
 import { scrapeCookinToken, passCookinFilter, formatCookinSummary } from './cookin-scraper.js';
+import { scrapeGmgnTopTraders } from './gmgn-top-traders.js';
 
 const STATE_FILE = './state.json';
 const LOG_FILE = './trade_log.json';
@@ -20,11 +21,17 @@ const CYCLE_INTERVAL_SEC = parseInt(process.env.CYCLE_INTERVAL_SEC || '300');
 const AUTO_SWAP = process.env.AUTO_SWAP === 'true';
 const BUDGET_SOL = parseFloat(process.env.BUDGET_SOL || '0.5');
 const OOR_ABOVE_LIMIT_MIN = parseFloat(process.env.OOR_ABOVE_LIMIT_MIN || '60');
+const OOR_ABOVE_REOPEN_VOL_USD = parseFloat(process.env.OOR_ABOVE_REOPEN_VOL_USD || '30000'); // threshold vol untuk re-open
+const OOR_ABOVE_MAX_REOPEN = parseInt(process.env.OOR_ABOVE_MAX_REOPEN || '2'); // max re-open berturut
 const OOR_BELOW_LIMIT_MIN = parseFloat(process.env.OOR_BELOW_LIMIT_MIN || '20');
 const VOL_DRY_THRESHOLD_USD = parseFloat(process.env.VOL_DRY_THRESHOLD_USD || '20000');
 const VOL_DRY_CYCLES = parseInt(process.env.VOL_DRY_CYCLES || '3');
+const TVL_DILUTED_MIN_HOLD_MIN = parseFloat(process.env.TVL_DILUTED_MIN_HOLD_MIN || '45');
+const TVL_DILUTED_THRESHOLD_USD = parseFloat(process.env.TVL_DILUTED_THRESHOLD_USD || '60000');
+const MONITOR_INTERVAL_SEC = parseInt(process.env.MONITOR_INTERVAL_SEC || '5');
 
 let cycleCount = 0;
+let monitorLoopActive = false; // flag agar hanya 1 monitor loop jalan
 
 function loadState() {
   if (!fs.existsSync(STATE_FILE)) return { activePosition: null };
@@ -55,6 +62,47 @@ function addKnownPool(poolAddress) {
   if (!pools.includes(poolAddress)) {
     pools.push(poolAddress);
     fs.writeFileSync(POOLS_FILE, JSON.stringify(pools, null, 2));
+  }
+}
+
+// ─── SUPPORT LEVEL (Top 10 Holders Avg Buy) ──────────────────────────────────
+async function calcSupportLevel(mint, symbol) {
+  try {
+    console.log(`[Support] Scraping top 10 holders for ${symbol}...`);
+    const traders = await scrapeGmgnTopTraders(mint);
+    if (!traders || traders.length === 0) {
+      console.log('[Support] No holder data, skip support level.');
+      return null;
+    }
+
+    // Weighted avg buy berdasarkan balancePct, skip yang N/A
+    const withData = traders.filter(t => t.avgCostUsd && t.avgCostUsd > 0);
+    if (withData.length === 0) {
+      console.log('[Support] Semua holder N/A avg buy, skip.');
+      return null;
+    }
+
+    const totalPct = withData.reduce((s, t) => s + t.balancePct, 0);
+    const weightedAvgUsd = withData.reduce((s, t) => s + (t.avgCostUsd * t.balancePct), 0) / totalPct;
+
+    // Convert ke SOL menggunakan Jupiter price
+    const solPriceUsd = await fetchJupiterPriceUsd('So11111111111111111111111111111111111111112');
+    if (!solPriceUsd || solPriceUsd <= 0) {
+      console.log('[Support] Gagal fetch SOL price, skip convert.');
+      return null;
+    }
+
+    const supportLevelSol = weightedAvgUsd / solPriceUsd;
+    const holderCount = withData.length;
+    const skipped = traders.length - holderCount;
+
+    console.log(`[Support] Weighted avg buy: $${weightedAvgUsd.toFixed(10)} | SOL price: $${solPriceUsd.toFixed(2)} | Support: ${supportLevelSol.toFixed(12)} SOL/token`);
+    console.log(`[Support] Data dari ${holderCount}/10 holders (${skipped} N/A dilewati)`);
+
+    return { supportLevelSol, supportLevelUsd: weightedAvgUsd, solPriceUsd, holderCount, skipped, traders };
+  } catch (e) {
+    console.error('[Support] Error:', e.message);
+    return null;
   }
 }
 
@@ -103,8 +151,46 @@ function ensureSingleInstance() {
   process.on('SIGTERM', () => { cleanup(); process.exit(0); });
 }
 
-// ─── VOLUME CHECK ─────────────────────────────────────────────
-// ─── VOLUME FETCH ────────────────────────────────────────────────
+// ─── TVL FETCH ────────────────────────────────────────────────────────────────
+async function fetchPoolTvl(poolAddress) {
+  try {
+    const res = await axios.get(`https://dlmm-api.meteora.ag/pair/${poolAddress}`, { timeout: 8000 });
+    const liquidity = parseFloat(res.data?.liquidity);
+    return Number.isFinite(liquidity) ? liquidity : null;
+  } catch (e) {
+    console.error('[TVL] Fetch error:', e.message);
+    return null;
+  }
+}
+
+// ─── TVL DILUTION CHECK (dipanggil dari runCycle) ─────────────────────────────
+async function checkTvlDilution(state) {
+  const pos_state = state.activePosition;
+  if (!pos_state) return false;
+
+  const holdMin = (Date.now() - pos_state.openedAt) / 60000;
+  if (holdMin < TVL_DILUTED_MIN_HOLD_MIN) {
+    console.log(`  [TVL] Hold ${holdMin.toFixed(1)}min — belum cek TVL (min ${TVL_DILUTED_MIN_HOLD_MIN}min)`);
+    return false;
+  }
+
+  const currentTvl = await fetchPoolTvl(pos_state.poolAddress);
+  if (currentTvl === null) {
+    console.log(`  [TVL] Fetch gagal, skip check.`);
+    return false;
+  }
+
+  console.log(`  [TVL] Current: ${fmtUsd(currentTvl)} | Threshold: ${fmtUsd(TVL_DILUTED_THRESHOLD_USD)} | Hold: ${holdMin.toFixed(1)}min`);
+
+  if (currentTvl >= TVL_DILUTED_THRESHOLD_USD) {
+    console.log(`  [TVL] DILUTED! TVL ${fmtUsd(currentTvl)} >= ${fmtUsd(TVL_DILUTED_THRESHOLD_USD)} setelah ${holdMin.toFixed(1)}min`);
+    return true;
+  }
+
+  return false;
+}
+
+
 async function fetchVol5m(tokenMint) {
   try {
     const url = `https://api.dexscreener.com/latest/dex/tokens/${tokenMint}`;
@@ -218,6 +304,324 @@ async function checkOrphanPositions(state) {
   }
 }
 
+// ─── MONITOR TICK (dipanggil tiap MONITOR_INTERVAL_SEC) ─────────────────────
+// Khusus baca PnL + trigger TP/SL/OOR/VOL_DRY secara realtime.
+// Telegram status update TIDAK dikirim di sini — itu tugas runCycle.
+async function monitorTick() {
+  const state = loadState();
+  if (!state.activePosition) return; // tidak ada posisi, skip
+
+  const pos_state = state.activePosition;
+  let data;
+  try {
+    data = await monitorPosition(pos_state);
+  } catch (e) {
+    console.error('[MonitorTick] Error:', e.message);
+    return;
+  }
+
+  if (data.error === 'position_not_found') {
+    console.log('[MonitorTick] Position not found on-chain, clearing state.');
+    saveState({ activePosition: null });
+    monitorLoopActive = false;
+    return;
+  }
+
+  const { inRange, pnlSol, pnlPct, totalFeeSol, currentPrice, activeBinId } = data;
+
+  // Prioritaskan angka Meteora datapi
+  let estPnlSol = pnlSol;
+  let estPnlPct = pnlPct;
+  let estPnlUsd = null;
+  let displayFeeSol = totalFeeSol;
+  let displayPrice = currentPrice;
+
+  const mData = await fetchMeteoraPortfolioPool(
+    wallet.publicKey.toBase58(),
+    pos_state.poolAddress,
+    pos_state.positionKey
+  );
+
+  if (mData) {
+    if (mData.pnlSol !== null) estPnlSol = mData.pnlSol;
+    if (mData.pnlPct !== null) estPnlPct = mData.pnlPct;
+    if (mData.pnlUsd !== null) estPnlUsd = mData.pnlUsd;
+    if (mData.unclaimedFeesSol !== null) displayFeeSol = mData.unclaimedFeesSol;
+    if (mData.poolPrice !== null) displayPrice = mData.poolPrice;
+  } else {
+    try {
+      const solPriceUsd = await fetchJupiterPriceUsd('So11111111111111111111111111111111111111112');
+      if (solPriceUsd && solPriceUsd > 0) estPnlUsd = estPnlSol * solPriceUsd;
+    } catch {}
+  }
+
+  const oorDir = getOORDirection(activeBinId, pos_state.minBinId, pos_state.maxBinId);
+  const oorLimit = oorDir === 'ABOVE' ? OOR_ABOVE_LIMIT_MIN : OOR_BELOW_LIMIT_MIN;
+
+  // Track OOR state
+  if (!inRange) {
+    if (!pos_state.outOfRangeSince) {
+      pos_state.outOfRangeSince = Date.now();
+      pos_state.oorDirection = oorDir;
+      saveState(state);
+      await sendTelegram(
+        `📍 <b>Out of Range!</b>\n` +
+        `Token: <b>${pos_state.symbol}</b>\n` +
+        `Arah: ${oorDir === 'ABOVE' ? '📈 Pump — tunggu reversal' : '📉 Dump — close lebih cepat'}\n` +
+        `Batas: ${oorLimit} menit\n` +
+        `PnL saat ini: ${fmtPct(estPnlPct)}`
+      );
+    }
+  } else {
+    if (pos_state.outOfRangeSince) {
+      await sendTelegram(
+        `✅ <b>Kembali In-Range!</b>\n` +
+        `Token: <b>${pos_state.symbol}</b>\n` +
+        `PnL: ${fmtPct(estPnlPct)} | Fee: ${fmtSol(displayFeeSol)} SOL\n` +
+        `Fee mulai masuk lagi 💰`
+      );
+      pos_state.outOfRangeSince = null;
+      pos_state.oorDirection = null;
+      saveState(state);
+    }
+  }
+
+  const outOfRangeMinutes = pos_state.outOfRangeSince
+    ? (Date.now() - pos_state.outOfRangeSince) / 60000 : 0;
+
+  console.log(`  [Tick] PnL: ${fmtPct(estPnlPct)} | Fee: ${fmtSol(displayFeeSol)} SOL | InRange: ${inRange} | OOR: ${outOfRangeMinutes.toFixed(1)}min | Support: ${pos_state.supportLevelSol ? fmtPrice(pos_state.supportLevelSol) : 'N/A'}`);
+
+  // ── SUPPORT LEVEL BROKEN — jika support level tersedia, ini MENGGANTIKAN SL %
+  if (pos_state.supportLevelSol && estPnlPct < 0) {
+    const currentPriceTick = displayPrice || data.currentPrice;
+    if (currentPriceTick > 0 && currentPriceTick < pos_state.supportLevelSol) {
+      console.log(`[Action] SUPPORT BROKEN! Price ${fmtPrice(currentPriceTick)} < Support ${fmtPrice(pos_state.supportLevelSol)}`);
+      monitorLoopActive = false;
+      await handleClose(state, pos_state, 'SUPPORT_BROKEN', estPnlSol, estPnlPct, displayFeeSol);
+      return;
+    }
+    // Support level ada → skip SL %, biarkan support yang handle
+    console.log(`  [SL] Support level aktif (${fmtPrice(pos_state.supportLevelSol)}) — SL % dinonaktifkan`);
+  } else {
+    // ── STOP LOSS fallback (hanya jika tidak ada support level)
+    if (estPnlPct <= -STOP_LOSS_PCT) {
+      console.log(`[Action] STOP LOSS -${STOP_LOSS_PCT}% triggered! (fallback — no support level data)`);
+      monitorLoopActive = false;
+      await handleClose(state, pos_state, 'STOP_LOSS', estPnlSol, estPnlPct, displayFeeSol);
+      return;
+    }
+  }
+
+  // ── TAKE PROFIT
+  if (estPnlPct >= TAKE_PROFIT_PCT) {
+    console.log('[Action] TAKE PROFIT triggered!');
+    monitorLoopActive = false;
+    await handleClose(state, pos_state, 'TAKE_PROFIT', estPnlSol, estPnlPct, displayFeeSol);
+    return;
+  }
+
+  // ── OOR smart limit
+  if (!inRange && outOfRangeMinutes >= oorLimit) {
+    if (oorDir === 'ABOVE') {
+      // Cek volume dulu sebelum close
+      const vol5m = await fetchVol5m(pos_state.mint);
+      const reopenCount = pos_state.reopenCount || 0;
+
+      if (vol5m !== null && vol5m >= OOR_ABOVE_REOPEN_VOL_USD && reopenCount < OOR_ABOVE_MAX_REOPEN) {
+        // Volume masih deres → close lalu re-open di range baru
+        console.log(`[Action] OOR_ABOVE timeout TAPI volume masih ${fmtUsd(vol5m)} >= ${fmtUsd(OOR_ABOVE_REOPEN_VOL_USD)} → RE-OPEN (attempt ${reopenCount + 1}/${OOR_ABOVE_MAX_REOPEN})`);
+        monitorLoopActive = false;
+
+        await sendTelegram(
+          `🔄 <b>OOR Above — Re-Open!</b>\n` +
+          `Token: <b>${pos_state.symbol}</b>\n` +
+          `Volume 5m masih kencang: <b>${fmtUsd(vol5m)}</b>\n` +
+          `Close posisi lama → buka ulang di range baru...\n` +
+          `Re-open attempt: ${reopenCount + 1}/${OOR_ABOVE_MAX_REOPEN}`
+        );
+
+        // Close posisi lama
+        try {
+          await closePosition(pos_state);
+        } catch (e) {
+          console.error('[ReOpen] Close error:', e.message);
+          await sendTelegram(`❌ <b>Gagal close untuk re-open!</b>\nError: ${e.message}`);
+          monitorLoopActive = true;
+          return;
+        }
+
+        // Tunggu settlement
+        await new Promise(r => setTimeout(r, 5000));
+
+        // Swap token sisa ke SOL dulu jika ada
+        if (AUTO_SWAP && pos_state.mint) {
+          const swapRes = await swapTokenToSol(pos_state.mint);
+          if (swapRes) console.log(`[ReOpen] Swap token sisa → ${swapRes.outSol.toFixed(6)} SOL`);
+        }
+
+        await new Promise(r => setTimeout(r, 3000));
+
+        // Re-open dengan token + pool yang sama
+        const bestToken = {
+          mint: pos_state.mint,
+          symbol: pos_state.symbol,
+          pool: {
+            address: pos_state.poolAddress,
+            mintX: pos_state.isSolX ? 'So11111111111111111111111111111111111111112' : pos_state.mint,
+            mintY: pos_state.isSolX ? pos_state.mint : 'So11111111111111111111111111111111111111112',
+            liquidity: 0,
+          },
+          _onPositionCreated: (data) => {
+            const s = loadState();
+            s.activePosition = {
+              ...data,
+              reopenCount: reopenCount + 1, // track jumlah re-open
+              walletBalanceBeforeOpenSol: pos_state.walletBalanceBeforeOpenSol,
+            };
+            saveState(s);
+            addKnownPool(data.poolAddress);
+            console.log(`[ReOpen] State saved after re-open layer 1 ✅`);
+          },
+        };
+
+        let newPosData;
+        try {
+          newPosData = await openPosition(bestToken);
+        } catch (e) {
+          console.error('[ReOpen] Open error:', e.message);
+          await sendTelegram(`❌ <b>Gagal re-open posisi!</b>\nToken: ${pos_state.symbol}\nError: ${e.message}\nBot kembali ke scan mode.`);
+          state.activePosition = null;
+          saveState(state);
+          return;
+        }
+
+        // Update txHash2
+        const freshState = loadState();
+        if (freshState.activePosition) {
+          freshState.activePosition.txHash2 = newPosData.txHash2;
+          saveState(freshState);
+        }
+
+        appendLog({
+          action: 'REOPEN',
+          reason: 'OOR_ABOVE_VOL_HIGH',
+          symbol: pos_state.symbol,
+          mint: pos_state.mint,
+          reopenCount: reopenCount + 1,
+          vol5m,
+          ...newPosData,
+        });
+
+        await sendTelegram(
+          `🎯 <b>Re-Open Berhasil!</b>\n` +
+          `Token: <b>${newPosData.symbol}</b>\n` +
+          `Entry price baru: <b>${fmtPrice(newPosData.entryPrice)}</b>\n` +
+          `Range: Bin ${newPosData.minBinId} → ${newPosData.maxBinId}\n` +
+          `Modal: <b>${newPosData.budgetSol} SOL</b>\n` +
+          `<a href="https://solscan.io/tx/${newPosData.txHash}">TX Layer 1</a>` +
+          (newPosData.txHash2 ? ` | <a href="https://solscan.io/tx/${newPosData.txHash2}">TX Layer 2</a>` : '')
+        );
+
+        startMonitorLoop();
+        return;
+      }
+
+      // Volume sepi atau sudah max re-open → close total
+      if (reopenCount >= OOR_ABOVE_MAX_REOPEN) {
+        console.log(`[Action] OOR_ABOVE — max re-open (${reopenCount}) tercapai, close total.`);
+      } else {
+        console.log(`[Action] OOR_ABOVE — volume sepi (${vol5m !== null ? fmtUsd(vol5m) : 'N/A'}), close total.`);
+      }
+      monitorLoopActive = false;
+      await handleClose(state, pos_state, 'OOR_ABOVE', estPnlSol, estPnlPct, displayFeeSol);
+      return;
+    }
+
+    // OOR_BELOW → langsung close
+    console.log(`[Action] OOR BELOW limit reached (${outOfRangeMinutes.toFixed(1)}/${oorLimit}min), closing.`);
+    monitorLoopActive = false;
+    await handleClose(state, pos_state, 'OOR_BELOW', estPnlSol, estPnlPct, displayFeeSol);
+    return;
+  }
+
+  // Simpan nilai terbaru ke pos_state agar runCycle bisa baca untuk Telegram update
+  pos_state._lastPnlPct = estPnlPct;
+  pos_state._lastPnlUsd = estPnlUsd;
+  pos_state._lastFeeSol = displayFeeSol;
+  pos_state._lastPrice = displayPrice;
+  pos_state._lastFeeToken = data.feeToken ?? null;
+  pos_state._lastTokenInPos = data.tokenInPos ?? null;
+  pos_state._lastInRange = inRange;
+  pos_state._lastOorDir = oorDir;
+  pos_state._lastOorMin = outOfRangeMinutes;
+  pos_state._lastOorLimit = oorLimit;
+  saveState(state);
+}
+
+// ─── VOLUME CHECK (dipanggil dari runCycle, bukan monitorTick) ───────────────
+// Vol check tetap per cycle karena data 5m dari DexScreener tidak berubah per detik
+async function checkVolume(state) {
+  const pos_state = state.activePosition;
+  if (!pos_state) return false; // false = tidak ada alasan close
+
+  const vol5m = await fetchVol5m(pos_state.mint);
+  console.log(`  Vol5m: ${vol5m !== null ? fmtUsd(vol5m) : 'N/A'} (threshold: ${fmtUsd(VOL_DRY_THRESHOLD_USD)})`);
+
+  if (vol5m === null) {
+    console.log(`  [VolDry] API Fetch Error - volume check skipped. Anggap aman.`);
+    return false;
+  }
+
+  if (vol5m < VOL_DRY_THRESHOLD_USD) {
+    pos_state.volDryCycles = (pos_state.volDryCycles || 0) + 1;
+    console.log(`  [VolDry] Low volume cycle ${pos_state.volDryCycles}/${VOL_DRY_CYCLES}`);
+    if (pos_state.volDryCycles === 1) {
+      await sendTelegram(
+        `📉 <b>Volume Mulai Sepi!</b>\n` +
+        `Token: <b>${pos_state.symbol}</b>\n` +
+        `Vol 5m: <b>${fmtUsd(vol5m)}</b> (threshold: ${fmtUsd(VOL_DRY_THRESHOLD_USD)})\n` +
+        `Cycle: ${pos_state.volDryCycles}/${VOL_DRY_CYCLES} — pantau terus...`
+      );
+    }
+    saveState(state);
+    if (pos_state.volDryCycles >= VOL_DRY_CYCLES) return true; // sinyal close
+  } else {
+    if ((pos_state.volDryCycles || 0) > 0) {
+      console.log(`  [VolDry] Volume recovered, reset counter`);
+      pos_state.volDryCycles = 0;
+      saveState(state);
+    }
+  }
+  return false;
+}
+
+// ─── MONITOR LOOP — jalan tiap MONITOR_INTERVAL_SEC selama ada posisi ────────
+async function startMonitorLoop() {
+  if (monitorLoopActive) return; // sudah jalan, skip
+  monitorLoopActive = true;
+  console.log(`[MonitorLoop] Started — interval ${MONITOR_INTERVAL_SEC}s`);
+
+  const loop = async () => {
+    if (!monitorLoopActive) return;
+    const state = loadState();
+    if (!state.activePosition) {
+      console.log('[MonitorLoop] No active position, stopping loop.');
+      monitorLoopActive = false;
+      return;
+    }
+    try {
+      await monitorTick();
+    } catch (e) {
+      console.error('[MonitorLoop] Tick error:', e.message);
+    }
+    if (monitorLoopActive) {
+      setTimeout(loop, MONITOR_INTERVAL_SEC * 1000);
+    }
+  };
+
+  setTimeout(loop, MONITOR_INTERVAL_SEC * 1000);
+}
+
 async function runCycle() {
   cycleCount++;
   const state = loadState();
@@ -232,186 +636,59 @@ async function runCycle() {
 
   // ─── MONITOR MODE ───────────────────────────────────────────
   if (state.activePosition) {
-    console.log('[Mode] MONITOR —', state.activePosition.symbol);
-    let data;
-    try {
-      data = await monitorPosition(state.activePosition);
-    } catch (e) {
-      console.error('[Monitor] Error:', e.message);
-      return;
-    }
-
-    if (data.error === 'position_not_found') {
-      console.log('[Monitor] Position not found on-chain, clearing state.');
-      saveState({ activePosition: null });
-      return;
-    }
-
-    const { inRange, pnlSol, pnlPct, totalFeeSol, feeXRaw, feeYRaw, currentPrice, activeBinId, solInPos, tokenInPos, feeSol, feeToken, tokenDecimals, dlmm, pos } = data;
     const pos_state = state.activePosition;
 
-    // Nilai default dari monitor on-chain
-    let estPnlSol = pnlSol;
-    let estPnlPct = pnlPct;
-    let estPnlUsd = null;
-    let displayFeeSol = totalFeeSol;
-    let displayPrice = currentPrice;
+    // Pastikan monitor loop jalan
+    startMonitorLoop();
 
-    // Prioritaskan angka dari Meteora datapi (sama dengan UI app.meteora.ag)
-    const mData = await fetchMeteoraPortfolioPool(
-      wallet.publicKey.toBase58(),
-      pos_state.poolAddress,
-      pos_state.positionKey
-    );
-
-    if (mData) {
-      if (mData.pnlSol !== null) estPnlSol = mData.pnlSol;
-      if (mData.pnlPct !== null) estPnlPct = mData.pnlPct;
-      if (mData.pnlUsd !== null) estPnlUsd = mData.pnlUsd;
-      if (mData.unclaimedFeesSol !== null) displayFeeSol = mData.unclaimedFeesSol;
-      if (mData.poolPrice !== null) displayPrice = mData.poolPrice;
-
-      console.log(
-        `  [EstPnL] Meteora datapi: ${fmtPct(estPnlPct)} ` +
-        `${estPnlUsd !== null ? `(~$${estPnlUsd.toFixed(2)})` : ''} | ` +
-        `Fee: ${fmtSol(displayFeeSol)} SOL | Price: ${fmtPrice(displayPrice)}`
-      );
-    } else {
-      // fallback: on-chain + konversi USD dari SOL price
-      try {
-        const solPriceUsd = await fetchJupiterPriceUsd('So11111111111111111111111111111111111111112');
-        if (solPriceUsd && solPriceUsd > 0) {
-          estPnlUsd = estPnlSol * solPriceUsd;
-          console.log(`  [EstPnL] Fallback on-chain: ${fmtPct(estPnlPct)} (~$${estPnlUsd.toFixed(2)}) | SOL=$${solPriceUsd.toFixed(2)}`);
-        } else {
-          console.log(`  [EstPnL] Fallback on-chain: ${fmtPct(estPnlPct)} (USD unavailable)`);
-        }
-      } catch (e) {
-        console.error('[EstPnL] SOL price fetch error:', e.message);
-      }
-    }
-
-    // ── VOLUME HEALTH CHECK
-    const vol5m = await fetchVol5m(pos_state.mint);
-    console.log(`  Vol5m: ${vol5m !== null ? fmtUsd(vol5m) : 'N/A'} (threshold: ${fmtUsd(VOL_DRY_THRESHOLD_USD)})`);
-
-    // vol5m null = fetch gagal (429/timeout). SKIP perhitungan cycle biar ga panik.
-    if (vol5m === null) {
-      console.log(`  [VolDry] API Fetch Error - Volume check skipped this cycle. Menganggap volume aman.`);
-      // biarkan volDryCycles yang lama tidak diubah
-    } else if (vol5m < VOL_DRY_THRESHOLD_USD) {
-      pos_state.volDryCycles = (pos_state.volDryCycles || 0) + 1;
-      console.log(`  [VolDry] Low volume ($${vol5m}) cycle ${pos_state.volDryCycles}/${VOL_DRY_CYCLES}`);
-      if (pos_state.volDryCycles === 1) {
-        await sendTelegram(
-          `📉 <b>Volume Mulai Sepi!</b>\n` +
-          `Token: <b>${pos_state.symbol}</b>\n` +
-          `Vol 5m: <b>${fmtUsd(vol5m)}</b> (threshold: ${fmtUsd(VOL_DRY_THRESHOLD_USD)})\n` +
-          `Cycle: ${pos_state.volDryCycles}/${VOL_DRY_CYCLES} — pantau terus...`
-        );
-      }
-      saveState(state);
-      if (pos_state.volDryCycles >= VOL_DRY_CYCLES) {
-        console.log(`[Action] VOL_DRY triggered after ${VOL_DRY_CYCLES} cycles!`);
-        await handleClose(state, pos_state, 'VOL_DRY', estPnlSol, estPnlPct, displayFeeSol);
-        return;
-      }
-    } else {
-      if (pos_state.volDryCycles > 0) {
-        console.log(`  [VolDry] Volume recovered, reset counter`);
-        pos_state.volDryCycles = 0;
-        saveState(state);
-      }
-    }
-
-    const oorDir = getOORDirection(activeBinId, pos_state.minBinId, pos_state.maxBinId);
-    const oorLimit = oorDir === 'ABOVE' ? OOR_ABOVE_LIMIT_MIN : OOR_BELOW_LIMIT_MIN;
-
-    // Track OOR
-    if (!inRange) {
-      if (!pos_state.outOfRangeSince) {
-        pos_state.outOfRangeSince = Date.now();
-        pos_state.oorDirection = oorDir;
-        saveState(state);
-        await sendTelegram(
-          `📍 <b>Out of Range!</b>\n` +
-          `Token: <b>${pos_state.symbol}</b>\n` +
-          `Arah: ${oorDir === 'ABOVE' ? '📈 Pump — tunggu reversal' : '📉 Dump — close lebih cepat'}\n` +
-          `Batas: ${oorLimit} menit\n` +
-          `PnL saat ini: ${fmtPct(estPnlPct)}`
-        );
-      }
-    } else {
-      if (pos_state.outOfRangeSince) {
-        await sendTelegram(
-          `✅ <b>Kembali In-Range!</b>\n` +
-          `Token: <b>${pos_state.symbol}</b>\n` +
-          `PnL: ${fmtPct(estPnlPct)} | Fee: ${fmtSol(displayFeeSol)} SOL\n` +
-          `Fee mulai masuk lagi 💰`
-        );
-      }
-      pos_state.outOfRangeSince = null;
-      pos_state.oorDirection = null;
-      saveState(state);
-    }
-
-    const outOfRangeMinutes = pos_state.outOfRangeSince
-      ? (Date.now() - pos_state.outOfRangeSince) / 60000 : 0;
-
-    console.log(`  PnL: ${fmtPct(estPnlPct)} | Fee: ${fmtSol(displayFeeSol)} SOL | InRange: ${inRange} | OOR: ${outOfRangeMinutes.toFixed(1)}min (${oorDir}) | Limit: ${oorLimit}min`);
-
-    // ── STOP LOSS (MATI / DISABLE SEMENTARA)
-    /*
-    if (estPnlPct <= -STOP_LOSS_PCT) {
-      console.log('[Action] STOP LOSS triggered!');
-      await handleClose(state, pos_state, 'STOP_LOSS', estPnlSol, estPnlPct, totalFeeSol);
-      return;
-    }
-    */
-
-    // ── TAKE PROFIT
-    if (estPnlPct >= TAKE_PROFIT_PCT) {
-      console.log('[Action] TAKE PROFIT triggered!');
-      await handleClose(state, pos_state, 'TAKE_PROFIT', estPnlSol, estPnlPct, displayFeeSol);
+    // ── VOLUME CHECK (per cycle)
+    const shouldClose = await checkVolume(state);
+    if (shouldClose) {
+      const pnlPct = pos_state._lastPnlPct ?? 0;
+      const pnlSol = 0;
+      const feeSol = pos_state._lastFeeSol ?? 0;
+      console.log(`[Action] VOL_DRY triggered after ${VOL_DRY_CYCLES} cycles!`);
+      monitorLoopActive = false;
+      await handleClose(state, pos_state, 'VOL_DRY', pnlSol, pnlPct, feeSol);
       return;
     }
 
-    // ── OOR smart limit
-    if (!inRange && outOfRangeMinutes >= oorLimit) {
-      const reason = oorDir === 'ABOVE' ? 'OOR_ABOVE' : 'OOR_BELOW';
-      console.log(`[Action] OOR ${oorDir} limit reached (${outOfRangeMinutes.toFixed(1)}/${oorLimit}min), closing.`);
-      await handleClose(state, pos_state, reason, estPnlSol, estPnlPct, displayFeeSol);
+    // ── TVL DILUTION CHECK (per cycle)
+    const tvlDiluted = await checkTvlDilution(state);
+    if (tvlDiluted) {
+      const pnlPct = pos_state._lastPnlPct ?? 0;
+      const feeSol = pos_state._lastFeeSol ?? 0;
+      console.log(`[Action] TVL_DILUTED triggered!`);
+      monitorLoopActive = false;
+      await handleClose(state, pos_state, 'TVL_DILUTED', 0, pnlPct, feeSol);
       return;
     }
 
-    // ── CLAIM FEE (disabled — fee akan terclaim otomatis saat close position)
-    // if (totalFeeSol >= FEE_CLAIM_THRESHOLD_SOL) {
-    //   console.log(`[Action] Claiming fees: ${fmtSol(totalFeeSol)} SOL`);
-    //   try {
-    //     await claimFees(pos_state, dlmm, pos);
-    //     await sendTelegram(...);
-    //   } catch (e) {
-    //     console.error('[Claim] Error:', e.message);
-    //   }
-    //   return;
-    // }
+    // ── TELEGRAM STATUS UPDATE (per cycle, pakai data terbaru dari monitorTick)
+    const pnlPct = pos_state._lastPnlPct ?? null;
+    const pnlUsd = pos_state._lastPnlUsd ?? null;
+    const feeSol = pos_state._lastFeeSol ?? 0;
+    const price = pos_state._lastPrice ?? 0;
+    const inRange = pos_state._lastInRange ?? true;
+    const oorDir = pos_state._lastOorDir ?? 'IN';
+    const oorMin = pos_state._lastOorMin ?? 0;
+    const oorLimit = pos_state._lastOorLimit ?? OOR_ABOVE_LIMIT_MIN;
 
-    // ── STATUS update setiap cycle (sekarang 1 menit)
-    {
-      const pnlText = estPnlUsd !== null
-        ? `${fmtPct(estPnlPct)} (~$${estPnlUsd.toFixed(2)})`
-        : fmtPct(estPnlPct);
+    if (pnlPct !== null) {
+      const pnlText = pnlUsd !== null
+        ? `${fmtPct(pnlPct)} (~$${pnlUsd.toFixed(2)})`
+        : fmtPct(pnlPct);
       await sendTelegram(
         `📊 <b>Position Update</b>\n` +
         `Token: <b>${pos_state.symbol}</b>\n` +
         `PnL: <b>${pnlText}</b>\n` +
-        `Fee: ${fmtSol(displayFeeSol)} SOL\n` +
-        `Price: ${fmtPrice(displayPrice)}\n` +
-        `Status: ${inRange ? '✅ In Range' : `⚠️ OOR ${oorDir} (${outOfRangeMinutes.toFixed(0)}/${oorLimit}min)`}`
+        `Fee: ${fmtSol(feeSol)} SOL\n` +
+        `Price: ${fmtPrice(price)}\n` +
+        `Status: ${inRange ? '✅ In Range' : `⚠️ OOR ${oorDir} (${oorMin.toFixed(0)}/${oorLimit}min)`}`
       );
     }
 
-    console.log(`[Status] Healthy. PnL: ${fmtPct(estPnlPct)}`);
+    console.log(`[Status] Monitoring active. PnL: ${pnlPct !== null ? fmtPct(pnlPct) : 'pending...'}`);
     return;
   }
 
@@ -495,6 +772,29 @@ async function runCycle() {
     saveState(finalState);
   }
 
+  // Scrape top 10 holders → hitung support level (async, tidak block open)
+  calcSupportLevel(best.mint, best.symbol).then(supportData => {
+    if (!supportData) return;
+    const s = loadState();
+    if (!s.activePosition) return;
+    s.activePosition.supportLevelSol = supportData.supportLevelSol;
+    s.activePosition.supportLevelUsd = supportData.supportLevelUsd;
+    s.activePosition.supportHolderCount = supportData.holderCount;
+    saveState(s);
+    console.log(`[Support] Saved to state: ${fmtPrice(supportData.supportLevelSol)} SOL/token ($${supportData.supportLevelUsd.toFixed(10)})`);
+
+    // Kirim info support level ke Telegram
+    const skipNote = supportData.skipped > 0 ? ` (${supportData.skipped} holder N/A dilewati)` : '';
+    sendTelegram(
+      `📊 <b>Support Level Top 10 Holders</b>\n` +
+      `Token: <b>${best.symbol}</b>\n` +
+      `Weighted Avg Buy: <b>$${supportData.supportLevelUsd.toFixed(10)}</b>\n` +
+      `Support (SOL): <b>${fmtPrice(supportData.supportLevelSol)}</b>\n` +
+      `Data dari: ${supportData.holderCount}/10 holders${skipNote}\n\n` +
+      `⚠️ Jika harga turun di bawah support ini saat PnL minus → auto close!`
+    );
+  }).catch(e => console.error('[Support] Background scrape error:', e.message));
+
   appendLog({
     action: 'OPEN',
     ...posData,
@@ -516,12 +816,37 @@ async function runCycle() {
   );
 }
 
+async function getTokenBalance(mint) {
+  try {
+    const { PublicKey } = await import('@solana/web3.js');
+    const [std, t22] = await Promise.all([
+      connection.getParsedTokenAccountsByOwner(wallet.publicKey, {
+        programId: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'),
+      }),
+      connection.getParsedTokenAccountsByOwner(wallet.publicKey, {
+        programId: new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb'),
+      }),
+    ]);
+    const acc = [...std.value, ...t22.value]
+      .find(a => a.account.data.parsed.info.mint === mint);
+    if (!acc) return { raw: '0', ui: 0, decimals: 0 };
+    const info = acc.account.data.parsed.info.tokenAmount;
+    return { raw: info.amount, ui: info.uiAmount || 0, decimals: info.decimals };
+  } catch {
+    return { raw: '0', ui: 0, decimals: 0 };
+  }
+}
+
 async function handleClose(state, pos_state, reason, pnlSol, pnlPct, totalFeeSol) {
   const duration = Math.floor((Date.now() - pos_state.openedAt) / 60000);
 
   const baselineSol = Number.isFinite(pos_state.walletBalanceBeforeOpenSol)
     ? pos_state.walletBalanceBeforeOpenSol
     : ((await connection.getBalance(wallet.publicKey)) / 1e9);
+
+  // Snapshot token balance SEBELUM close (biasanya 0, tapi safe)
+  const tokenBefore = await getTokenBalance(pos_state.mint);
+  console.log(`[Close] Token balance before close: ${tokenBefore.ui} (${tokenBefore.raw} raw)`);
 
   try {
     await closePosition(pos_state);
@@ -531,19 +856,72 @@ async function handleClose(state, pos_state, reason, pnlSol, pnlPct, totalFeeSol
     return;
   }
 
-  // Tunggu chain settle dulu
-  await new Promise(r => setTimeout(r, 5000));
+  // Polling sampai token landing di wallet (max 10x × 3 detik = 30 detik)
+  let tokenAfter = { raw: '0', ui: 0, decimals: tokenBefore.decimals };
+  let retries = 0;
+  console.log('[Close] Waiting for token to land in wallet...');
+  while (retries < 10) {
+    await new Promise(r => setTimeout(r, 3000));
+    tokenAfter = await getTokenBalance(pos_state.mint);
+    if (tokenAfter.raw !== '0') {
+      console.log(`[Close] Token landed: ${tokenAfter.ui} (after ${retries + 1} retries)`);
+      break;
+    }
+    retries++;
+    console.log(`[Close] Waiting... (${retries}/10) token still 0`);
+  }
+
+  // Hitung breakdown token yang diterima
+  const tokenReceived = tokenAfter.ui - tokenBefore.ui;
+  // Estimasi dari data monitor terakhir
+  const estFeeToken = pos_state._lastFeeToken ?? null;
+  const estLpToken = pos_state._lastTokenInPos ?? null;
+  console.log(`[Close] Token received: ${tokenReceived.toFixed(4)} | from LP: ${estLpToken ?? 'N/A'} | fee: ${estFeeToken ?? 'N/A'}`);
 
   let swapResult = null;
   if (AUTO_SWAP && pos_state.mint) {
-    console.log('[Swap] Auto-swap token → SOL via Jupiter Ultra...');
-    swapResult = await swapTokenToSol(pos_state.mint);
-    if (swapResult) {
-      console.log(`[Swap] Got ${swapResult.outSol.toFixed(6)} SOL`);
-      // Tunggu swap settle
-      await new Promise(r => setTimeout(r, 3000));
+    if (tokenAfter.raw === '0') {
+      console.log('[Swap] Token still 0 after 30s — skip swap');
+      // Tidak perlu alert — memang tidak ada token (seperti kasus neet)
     } else {
-      console.log('[Swap] Swap gagal atau tidak ada token — skip');
+      // Infinite retry swap sampai berhasil, dengan backoff bertahap
+      // Alert Telegram dikirim tiap 5x gagal agar tidak spam tapi tetap informatif
+      let swapAttempt = 0;
+      const SWAP_ALERT_EVERY = 5; // alert tiap N kali gagal
+      const SWAP_BACKOFF = [5, 10, 15, 30, 60]; // detik, index capped di akhir
+      while (!swapResult) {
+        swapAttempt++;
+        const backoffSec = SWAP_BACKOFF[Math.min(swapAttempt - 1, SWAP_BACKOFF.length - 1)];
+        console.log(`[Swap] Attempt #${swapAttempt} | ${tokenAfter.ui} ${pos_state.symbol} → SOL`);
+        swapResult = await swapTokenToSol(pos_state.mint);
+        if (swapResult) {
+          console.log(`[Swap] Success at attempt #${swapAttempt}! Got ${swapResult.outSol.toFixed(6)} SOL`);
+          await new Promise(r => setTimeout(r, 3000));
+          break;
+        }
+
+        console.log(`[Swap] Attempt #${swapAttempt} gagal, retry dalam ${backoffSec}s...`);
+
+        // Kirim alert Telegram tiap SWAP_ALERT_EVERY kali gagal
+        if (swapAttempt % SWAP_ALERT_EVERY === 0) {
+          await sendTelegram(
+            `⚠️ <b>Swap Masih Gagal (attempt #${swapAttempt})</b>\n` +
+            `Token: <b>${pos_state.symbol}</b>\n` +
+            `Jumlah: <b>${tokenAfter.ui.toFixed(4)} token</b>\n` +
+            `Bot akan terus retry otomatis.\n` +
+            `Manual swap jika mendesak: <a href="https://jup.ag/swap/${pos_state.mint}-SOL">jup.ag</a>`
+          );
+        }
+
+        await new Promise(r => setTimeout(r, backoffSec * 1000));
+
+        // Re-cek balance token — mungkin sudah ke-swap eksternal atau habis
+        const recheck = await getTokenBalance(pos_state.mint);
+        if (recheck.raw === '0') {
+          console.log('[Swap] Token balance jadi 0 saat recheck — anggap sudah ter-handle, stop retry.');
+          break;
+        }
+      }
     }
   }
 
@@ -565,27 +943,43 @@ async function handleClose(state, pos_state, reason, pnlSol, pnlPct, totalFeeSol
     oor_direction: pos_state.oorDirection || null,
     balance_before_open_sol: baselineSol,
     balance_after_close_sol: afterCloseSol,
+    token_received: tokenReceived,
+    token_from_lp: estLpToken,
+    token_from_fee: estFeeToken,
     swap_result: swapResult,
   });
 
   state.activePosition = null;
   saveState(state);
 
-  const emoji = { TAKE_PROFIT: '🎉', STOP_LOSS: '🛑', OOR_ABOVE: '📈', OOR_BELOW: '📉', VOL_DRY: '🌵' }[reason] || '⚠️';
+  const emoji = { TAKE_PROFIT: '🎉', STOP_LOSS: '🛑', OOR_ABOVE: '📈', OOR_BELOW: '📉', VOL_DRY: '🌵', TVL_DILUTED: '🏊', SUPPORT_BROKEN: '🔻' }[reason] || '⚠️';
   const label = {
     TAKE_PROFIT: 'Take Profit',
     STOP_LOSS: 'Stop Loss',
     OOR_ABOVE: 'OOR Pump — habis waktu tunggu',
     OOR_BELOW: 'OOR Dump — cut cepat',
     VOL_DRY: 'Volume Sepi — keluar sebelum terlambat',
+    TVL_DILUTED: 'TVL Terlalu Besar — fee makin encer, cabut!',
+    SUPPORT_BROKEN: 'Support Level Jebol — top holders avg buy ditembus!',
   }[reason] || reason;
+
+  // Build token breakdown line
+  let tokenBreakdownLine = '';
+  if (tokenReceived > 0) {
+    let breakdown = `${tokenReceived.toFixed(4)} ${pos_state.symbol}`;
+    if (estLpToken !== null && estFeeToken !== null) {
+      breakdown += ` (LP: ${estLpToken.toFixed(4)} + Fee: ${estFeeToken.toFixed(4)})`;
+    }
+    tokenBreakdownLine = `\nToken Diterima: <b>${breakdown}</b>`;
+  }
 
   let msg =
     `${emoji} <b>Position Closed — ${label}</b>\n` +
     `Token: <b>${pos_state.symbol}</b>\n` +
     `Durasi: ${duration} menit\n` +
     `PnL Realized: <b>${fmtPct(realizedPnlPct)} (${fmtSol(realizedPnlSol)} SOL)</b>\n` +
-    `Fee (est): ${fmtSol(totalFeeSol)} SOL\n`;
+    `Fee (est): ${fmtSol(totalFeeSol)} SOL` +
+    tokenBreakdownLine + `\n`;
 
   if (swapResult) {
     msg += `\n🔄 Auto-swap: +${fmtSol(swapResult.outSol)} SOL\n`;
@@ -602,7 +996,7 @@ async function main() {
   ensureSingleInstance();
   console.log('🤖 DLMM Agent starting...');
   console.log(`Wallet: ${wallet.publicKey.toBase58()}`);
-  console.log(`SL: OFF (configured -${STOP_LOSS_PCT}% disabled) | TP: +${TAKE_PROFIT_PCT}%`);
+  console.log(`SL: -${STOP_LOSS_PCT}% | TP: +${TAKE_PROFIT_PCT}% | Monitor: tiap ${MONITOR_INTERVAL_SEC}s | Cycle: tiap ${CYCLE_INTERVAL_SEC/60}min`);
   console.log(`OOR Above: ${OOR_ABOVE_LIMIT_MIN}min | OOR Below: ${OOR_BELOW_LIMIT_MIN}min`);
 
   // Patch dlmm bytes import
@@ -621,7 +1015,8 @@ async function main() {
     `🤖 <b>DLMM Agent Started!</b>\n` +
     `Wallet: <code>${wallet.publicKey.toBase58()}</code>\n` +
     `Budget: ${BUDGET_SOL} SOL | Bins: ${process.env.RANGE_BINS}\n` +
-    `TP: +${TAKE_PROFIT_PCT}% | SL: OFF (configured -${STOP_LOSS_PCT}%)\n` +
+    `TP: +${TAKE_PROFIT_PCT}% | SL: -${STOP_LOSS_PCT}%\n` +
+    `Monitor: tiap ${MONITOR_INTERVAL_SEC}s | Cycle: tiap ${CYCLE_INTERVAL_SEC / 60} menit\n` +
     `OOR Pump: ${OOR_ABOVE_LIMIT_MIN}min | OOR Dump: ${OOR_BELOW_LIMIT_MIN}min\n` +
     `Cycle: tiap ${CYCLE_INTERVAL_SEC / 60} menit\n` +
     `Orphan check: tiap 3 cycles ✅`

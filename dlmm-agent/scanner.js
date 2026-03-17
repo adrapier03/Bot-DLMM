@@ -12,6 +12,7 @@ const SOL = 'So11111111111111111111111111111111111111112';
 const MIN_POOL_LIQUIDITY = parseFloat(process.env.MIN_POOL_LIQUIDITY || '50000');
 const MAX_PRICE_CHANGE_5M = parseFloat(process.env.MAX_PRICE_CHANGE_5M || '15');
 const MAX_PRICE_CHANGE_1H = parseFloat(process.env.MAX_PRICE_CHANGE_1H || '50');
+const MAX_MC_USD = parseFloat(process.env.MAX_MC_USD || '2000000'); // reject jika MC >= 2M
 
 // Cache pairs — fetch ulang tiap 30 menit
 let pairsCache = null;
@@ -100,19 +101,26 @@ export async function scanTokens() {
 
     if (!mint) { console.log(`  ❌ REJECT: mint address tidak ada`); continue; }
 
-    // Filter price change 5m
-    if (Math.abs(priceChange5m) > MAX_PRICE_CHANGE_5M) {
-      console.log(`  ❌ REJECT: Price spike 5m terlalu besar (${priceChange5m.toFixed(2)}%, max ±${MAX_PRICE_CHANGE_5M}%)`);
-      results.rejected.price_spike = (results.rejected.price_spike || 0) + 1;
+    // Filter MC — reject jika MC >= MAX_MC_USD
+    if (mc >= MAX_MC_USD) {
+      console.log(`  ❌ REJECT: MC terlalu besar (${fmtUsd(mc)} >= ${fmtUsd(MAX_MC_USD)})`);
+      results.rejected.mc_too_large = (results.rejected.mc_too_large || 0) + 1;
       continue;
     }
 
-    // Filter price change 1h
-    if (Math.abs(priceChange1h) > MAX_PRICE_CHANGE_1H) {
-      console.log(`  ❌ REJECT: Price spike 1h terlalu besar (${priceChange1h.toFixed(2)}%, max ±${MAX_PRICE_CHANGE_1H}%)`);
-      results.rejected.price_spike_1h = (results.rejected.price_spike_1h || 0) + 1;
-      continue;
-    }
+    // Filter price change 5m (DIMATIKAN)
+    // if (Math.abs(priceChange5m) > MAX_PRICE_CHANGE_5M) {
+    //   console.log(`  ❌ REJECT: Price spike 5m terlalu besar (${priceChange5m.toFixed(2)}%, max ±${MAX_PRICE_CHANGE_5M}%)`);
+    //   results.rejected.price_spike = (results.rejected.price_spike || 0) + 1;
+    //   continue;
+    // }
+
+    // Filter price change 1h (DIMATIKAN)
+    // if (Math.abs(priceChange1h) > MAX_PRICE_CHANGE_1H) {
+    //   console.log(`  ❌ REJECT: Price spike 1h terlalu besar (${priceChange1h.toFixed(2)}%, max ±${MAX_PRICE_CHANGE_1H}%)`);
+    //   results.rejected.price_spike_1h = (results.rejected.price_spike_1h || 0) + 1;
+    //   continue;
+    // }
 
     // Cari pool Meteora
     const matched = allPairs.filter(p =>
@@ -170,7 +178,7 @@ export async function scanTokens() {
   }
 
   console.log(`\n${separator}`);
-  console.log(`[Scanner] Hasil: ${results.scanned} scanned | ${results.passed.length} lolos | rejected: Spike5m=${results.rejected.price_spike||0} Spike1h=${results.rejected.price_spike_1h||0} NoPool=${results.rejected.no_pool||0} LowLiq=${results.rejected.low_liquidity||0} Cookin=${results.rejected.cookin_reject||0}`);
+  console.log(`[Scanner] Hasil: ${results.scanned} scanned | ${results.passed.length} lolos | rejected: MC=${results.rejected.mc_too_large||0} Spike5m=${results.rejected.price_spike||0} Spike1h=${results.rejected.price_spike_1h||0} NoPool=${results.rejected.no_pool||0} LowLiq=${results.rejected.low_liquidity||0} Cookin=${results.rejected.cookin_reject||0}`);
   console.log(separator);
 
   return results;
