@@ -15,12 +15,15 @@ const POOLS_FILE = './known_pools.json'; // track semua pool yang pernah dipakai
 const PID_FILE = './agent.pid';
 
 const STOP_LOSS_PCT = parseFloat(process.env.STOP_LOSS_PCT || '20');
+const EMERGENCY_STOP_LOSS_PCT = parseFloat(process.env.EMERGENCY_STOP_LOSS_PCT || '30'); // emergency SL — aktif meski ada support level
 const TAKE_PROFIT_PCT = parseFloat(process.env.TAKE_PROFIT_PCT || '10');
 const FEE_CLAIM_THRESHOLD_SOL = parseFloat(process.env.FEE_CLAIM_THRESHOLD_SOL || '0.03');
 const CYCLE_INTERVAL_SEC = parseInt(process.env.CYCLE_INTERVAL_SEC || '300');
 const AUTO_SWAP = process.env.AUTO_SWAP === 'true';
 const BUDGET_SOL = parseFloat(process.env.BUDGET_SOL || '0.5');
 const OOR_ABOVE_LIMIT_MIN = parseFloat(process.env.OOR_ABOVE_LIMIT_MIN || '60');
+const PNL_STUCK_THRESHOLD_PCT = parseFloat(process.env.PNL_STUCK_THRESHOLD_PCT || '1');   // PnL threshold "udah naik"
+const PNL_STUCK_TIMEOUT_MS = parseFloat(process.env.PNL_STUCK_TIMEOUT_MIN || '2') * 60 * 1000; // waktu tunggu setelah nyentuh threshold
 const OOR_ABOVE_REOPEN_VOL_USD = parseFloat(process.env.OOR_ABOVE_REOPEN_VOL_USD || '30000'); // threshold vol untuk re-open
 const OOR_ABOVE_MAX_REOPEN = parseInt(process.env.OOR_ABOVE_MAX_REOPEN || '2'); // max re-open berturut
 const OOR_BELOW_LIMIT_MIN = parseFloat(process.env.OOR_BELOW_LIMIT_MIN || '20');
@@ -400,8 +403,15 @@ async function monitorTick() {
       await handleClose(state, pos_state, 'SUPPORT_BROKEN', estPnlSol, estPnlPct, displayFeeSol);
       return;
     }
-    // Support level ada → skip SL %, biarkan support yang handle
+    // Support level ada → cek emergency SL dulu sebelum skip SL %
     console.log(`  [SL] Support level aktif (${fmtPrice(pos_state.supportLevelSol)}) — SL % dinonaktifkan`);
+    // Emergency SL — tetap trigger meski ada support level
+    if (estPnlPct <= -EMERGENCY_STOP_LOSS_PCT) {
+      console.log(`[Action] EMERGENCY STOP LOSS -${EMERGENCY_STOP_LOSS_PCT}% triggered! PnL: ${fmtPct(estPnlPct)}`);
+      monitorLoopActive = false;
+      await handleClose(state, pos_state, 'STOP_LOSS', estPnlSol, estPnlPct, displayFeeSol);
+      return;
+    }
   } else {
     // ── STOP LOSS fallback (hanya jika tidak ada support level)
     if (estPnlPct <= -STOP_LOSS_PCT) {
@@ -409,6 +419,33 @@ async function monitorTick() {
       monitorLoopActive = false;
       await handleClose(state, pos_state, 'STOP_LOSS', estPnlSol, estPnlPct, displayFeeSol);
       return;
+    }
+  }
+
+  // ── PNL STUCK — jika PnL nyentuh threshold tapi tidak naik ke TP dalam timeout → close di threshold
+  if (estPnlPct >= PNL_STUCK_THRESHOLD_PCT) {
+    if (!pos_state._pnlStuckFirstHitAt) {
+      // Pertama kali nyentuh threshold — catat waktunya, mulai timer
+      pos_state._pnlStuckFirstHitAt = Date.now();
+      console.log(`  [Stuck] PnL nyentuh +${PNL_STUCK_THRESHOLD_PCT}% — mulai timer ${PNL_STUCK_TIMEOUT_MS/60000} menit`);
+    } else {
+      // Sudah dalam timer — cek apakah timeout
+      const elapsedMs = Date.now() - pos_state._pnlStuckFirstHitAt;
+      const elapsedMin = (elapsedMs / 60000).toFixed(1);
+      console.log(`  [Stuck] PnL masih di +${fmtPct(estPnlPct)} — elapsed: ${elapsedMin}/${PNL_STUCK_TIMEOUT_MS/60000} menit`);
+      if (elapsedMs >= PNL_STUCK_TIMEOUT_MS) {
+        // Timeout habis dan PnL masih >= threshold → close sekarang selagi masih profit
+        console.log(`[Action] PNL_STUCK! Timeout ${elapsedMin} menit — close selagi masih +${fmtPct(estPnlPct)}`);
+        monitorLoopActive = false;
+        await handleClose(state, pos_state, 'PNL_STUCK', estPnlSol, estPnlPct, displayFeeSol);
+        return;
+      }
+    }
+  } else {
+    // PnL turun di bawah threshold — reset timer, tunggu naik lagi
+    if (pos_state._pnlStuckFirstHitAt) {
+      console.log(`  [Stuck] PnL turun di bawah +${PNL_STUCK_THRESHOLD_PCT}% (${fmtPct(estPnlPct)}) — reset timer, tunggu naik lagi`);
+      pos_state._pnlStuckFirstHitAt = null;
     }
   }
 
@@ -952,7 +989,7 @@ async function handleClose(state, pos_state, reason, pnlSol, pnlPct, totalFeeSol
   state.activePosition = null;
   saveState(state);
 
-  const emoji = { TAKE_PROFIT: '🎉', STOP_LOSS: '🛑', OOR_ABOVE: '📈', OOR_BELOW: '📉', VOL_DRY: '🌵', TVL_DILUTED: '🏊', SUPPORT_BROKEN: '🔻' }[reason] || '⚠️';
+  const emoji = { TAKE_PROFIT: '🎉', STOP_LOSS: '🛑', OOR_ABOVE: '📈', OOR_BELOW: '📉', VOL_DRY: '🌵', TVL_DILUTED: '🏊', SUPPORT_BROKEN: '🔻', PNL_STUCK: '😐' }[reason] || '⚠️';
   const label = {
     TAKE_PROFIT: 'Take Profit',
     STOP_LOSS: 'Stop Loss',

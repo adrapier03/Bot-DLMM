@@ -170,7 +170,10 @@ export async function scanTokens() {
         continue;
       }
     } else {
-      console.log(`  ⚠️ Cookin.fun scrape gagal — lanjut tanpa filter cookin`);
+      console.log(`  ❌ REJECT: Cookin.fun tidak ada data (token belum ter-index atau scrape gagal)`);
+      results.rejected.cookin_reject = (results.rejected.cookin_reject || 0) + 1;
+      results.cookinRejectDetails.push(`${symbol}: No Cookin data (N/A)`);
+      continue;
     }
 
     console.log(`  ✅ LOLOS semua filter — masuk kandidat!`);

@@ -103,9 +103,9 @@ def run():
             time.sleep(2)
             safe_click(page, "text=Filter", "Filter", timeout=5000)
 
-            page.fill("(//input[@placeholder='Min'])[3]", "100")
+            page.fill("(//input[@placeholder='Min'])[3]", "150")
             time.sleep(1)
-            page.fill("(//input[@placeholder='Min'])[4]", "40")
+            page.fill("(//input[@placeholder='Min'])[4]", "25")
             time.sleep(1)
             page.fill("(//input[@placeholder='Min'])[5]", "10")
             time.sleep(1)

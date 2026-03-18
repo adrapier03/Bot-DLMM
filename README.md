@@ -49,20 +49,20 @@ Project ini menggabungkan 2 komponen dalam **1 folder**:
 - Cari pair Meteora DLMM yang match token + SOL (pakai cache 30 menit).
 - Terapkan filter aktif:
   - **Pool tersedia** → wajib ada pair SOL di Meteora DLMM
-  - **Cookin.fun behavioral filter** → reject jika bearish count **> 2** dari 7 metrik:
-    - Bundle, Dirty, Dumpers, AlphaHands, InProfit, Top10, SellImpact
+  - **MC filter** → reject jika MC ≥ `MAX_MC_USD` (default **$2.000.000**)
+  - **Cookin.fun behavioral filter:**
+    - Reject jika **semua metrik N/A** (token belum ter-index di Cookin)
+    - Reject jika bearish count **≥ 3** dari 7 metrik: Bundle, Dirty, Dumpers, AlphaHands, InProfit, Top10, SellImpact
+    - Reject jika **Cookin scrape gagal total** (null)
 - Filter yang sudah **DINONAKTIFKAN** (commented out di code):
   - ~~Spike 5m~~ (MAX_PRICE_CHANGE_5M)
   - ~~Spike 1h~~ (MAX_PRICE_CHANGE_1H)
   - ~~Minimum liquidity pool~~ (MIN_POOL_LIQUIDITY)
   - ~~Hard reject individual Cookin~~ (bundle > 70%, dumpers > 80%, dll)
-  - **MC filter** → reject jika MC ≥ `MAX_MC_USD` (default **$2.000.000**)
 - Hasil scan:
   - `passed[]` kandidat untuk dieksekusi
   - `rejected` counter alasan reject
   - `scannedTokens[]` daftar token yang discan (untuk notifikasi Telegram)
-
-> Catatan: filter **MC** dan **Vol 5m** sudah dinonaktifkan (diasumsikan pre-filter dari JSON source).
 
 ### 3) DLMM Executor (`dlmm-agent/agent.js`)
 - Jika belum ada posisi aktif:
@@ -87,7 +87,7 @@ Project ini menggabungkan 2 komponen dalam **1 folder**:
 
 ### 5) Kondisi Close Posisi (Auto-Close Triggers)
 
-Bot punya **7 kondisi** yang bisa trigger close otomatis. Dicek di 2 tempat berbeda:
+Bot punya **9 kondisi** yang bisa trigger close otomatis. Dicek di 2 tempat berbeda:
 
 **Monitor Tick** (tiap `MONITOR_INTERVAL_SEC` = 2 detik) — realtime:
 
@@ -95,8 +95,20 @@ Bot punya **7 kondisi** yang bisa trigger close otomatis. Dicek di 2 tempat berb
 |---|---|---|---|
 | 🔻 `SUPPORT_BROKEN` | Harga < avg buy top 10 holders & PnL minus | Dinamis (hasil scrape GMGN) | **SL utama** — menggantikan SL % jika data tersedia |
 | 🛑 `STOP_LOSS` | PnL ≤ -N% | `STOP_LOSS_PCT=10` → **-10%** | **Fallback only** — hanya aktif jika support level tidak ada |
+| 🛑 `EMERGENCY_STOP_LOSS` | PnL ≤ -N% | `EMERGENCY_STOP_LOSS_PCT=25` → **-25%** | **Selalu aktif** meski ada support level — batas kerugian mutlak |
 | 🎉 `TAKE_PROFIT` | PnL ≥ +N% | `TAKE_PROFIT_PCT=2` → **+2%** | Langsung close begitu nyentuh angka ini |
-| 📈 `OOR_ABOVE` | Harga pump keluar range atas > N menit | `OOR_ABOVE_LIMIT_MIN=5` → **5 menit** | Cek volume dulu sebelum close — jika volume masih deres → **re-open** di range baru |
+| 😐 `PNL_STUCK` | PnL nyentuh +1% tapi tidak naik ke TP dalam 2 menit | `PNL_STUCK_THRESHOLD_PCT=1`, `PNL_STUCK_TIMEOUT_MIN=2` | Close selagi masih profit — timer reset jika PnL turun di bawah threshold |
+| 📈 `OOR_ABOVE` | Harga pump keluar range atas > N menit | `OOR_ABOVE_LIMIT_MIN=5` → **5 menit** | Cek volume dulu — jika volume masih deres → **re-open** di range baru |
+| 📉 `OOR_BELOW` | Harga dump keluar range bawah > N menit | `OOR_BELOW_LIMIT_MIN=20` → **20 menit** | Lebih toleran dari OOR_ABOVE karena dump kadang reversal |
+
+**Logic PNL_STUCK detail:**
+```
+PnL nyentuh +1%? → timer mulai
+    ├── Dalam 2 menit naik ke +2% (TP)? → 🎉 TAKE_PROFIT normal
+    ├── 2 menit habis, PnL masih ≥ +1%? → 😐 PNL_STUCK → close di profit
+    └── PnL turun di bawah +1% sebelum 2 menit? → reset timer
+            ↓ naik lagi ke +1% → timer mulai lagi dari 0
+```
 
 **Logic OOR Above detail:**
 ```
@@ -104,24 +116,23 @@ OOR Above > 5 menit
     ↓
 Cek volume 5m token
     ↓
-Vol >= OOR_ABOVE_REOPEN_VOL_USD ($30K) DAN reopenCount < OOR_ABOVE_MAX_REOPEN (2)?
-    ├── YA → close posisi lama → swap sisa token → re-open di active bin baru (sama seperti open biasa)
+Vol >= OOR_ABOVE_REOPEN_VOL_USD ($20K) DAN reopenCount < OOR_ABOVE_MAX_REOPEN (2)?
+    ├── YA → close posisi lama → swap sisa token → re-open di active bin baru
     └── TIDAK → close total, scan token baru
 ```
 
-> Env vars terkait: `OOR_ABOVE_REOPEN_VOL_USD=30000` (threshold vol re-open) | `OOR_ABOVE_MAX_REOPEN=2` (max re-open berturut, safety limit)
-| 📉 `OOR_BELOW` | Harga dump keluar range bawah > N menit | `OOR_BELOW_LIMIT_MIN=20` → **20 menit** | Lebih toleran dari OOR_ABOVE karena dump kadang reversal |
+> Env vars re-open: `OOR_ABOVE_REOPEN_VOL_USD=20000` | `OOR_ABOVE_MAX_REOPEN=2`
 
 **Run Cycle** (tiap `CYCLE_INTERVAL_SEC` = 60 detik) — per siklus:
 
 | Kondisi | Trigger | Nilai Aktif (.env) | Keterangan |
 |---|---|---|---|
-| 🌵 `VOL_DRY` | Vol 5m < threshold selama N cycle berturut | `VOL_DRY_THRESHOLD_USD=15000`, `VOL_DRY_CYCLES=6` → **< $15K selama 6 menit** | Counter reset jika volume recover. Alert Telegram dikirim di cycle pertama |
-| 🏊 `TVL_DILUTED` | TVL pool ≥ threshold setelah hold N menit | `TVL_DILUTED_THRESHOLD_USD=60000`, `TVL_DILUTED_MIN_HOLD_MIN=45` → **> $60K setelah 45 menit** | TVL membengkak = fee makin encer karena LP lain masuk banyak |
+| 🌵 `VOL_DRY` | Vol 5m < threshold selama N cycle berturut | `VOL_DRY_THRESHOLD_USD=15000`, `VOL_DRY_CYCLES=6` → **< $15K selama 6 menit** | Counter reset jika volume recover |
+| 🏊 `TVL_DILUTED` | TVL pool ≥ threshold setelah hold N menit | `TVL_DILUTED_THRESHOLD_USD=60000`, `TVL_DILUTED_MIN_HOLD_MIN=45` → **> $60K setelah 45 menit** | TVL membengkak = fee makin encer |
 
 **Urutan prioritas check di Monitor Tick:**
 ```
-SUPPORT_BROKEN → STOP_LOSS (fallback) → TAKE_PROFIT → OOR timeout
+SUPPORT_BROKEN → EMERGENCY_STOP_LOSS → STOP_LOSS (fallback) → PNL_STUCK → TAKE_PROFIT → OOR timeout
 ```
 
 **Urutan prioritas check di Run Cycle:**

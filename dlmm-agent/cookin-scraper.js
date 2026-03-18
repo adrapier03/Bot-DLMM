@@ -193,6 +193,15 @@ export function passCookinFilter(data) {
 
   const reasons = [];
 
+  // Reject jika semua metrik N/A (token belum ter-index di Cookin)
+  const r = data.ratings;
+  const allUnknown = Object.values(r).every(m => m.rating === 'unknown' || m.val === null);
+  if (allUnknown) {
+    reasons.push(`Semua metrik N/A — token belum ter-index di Cookin.fun`);
+    console.log(`[Cookin] ❌ REJECT: Semua metrik N/A`);
+    return { pass: false, reasons };
+  }
+
   // Syarat utama: Harus maksimal 2 sinyal merah (bearish max 2)
   if (data.bearishCount > 2) {
     reasons.push(`Terlalu banyak bearish/merah (${data.bearishCount}/7)`);
