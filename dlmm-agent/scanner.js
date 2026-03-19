@@ -4,6 +4,14 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 import { scrapeCookinToken, passCookinFilter, formatCookinSummary } from './cookin-scraper.js';
+import DLMM, { getBinArrayKeysCoverage } from '@meteora-ag/dlmm';
+import { Connection, PublicKey } from '@solana/web3.js';
+import { BN } from '@coral-xyz/anchor';
+
+const HELIUS_API_KEYS = process.env.HELIUS_API_KEYS
+  ? process.env.HELIUS_API_KEYS.split(',').map(k => k.trim())
+  : [process.env.HELIUS_API_KEY || ''];
+const _conn = new Connection(`https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEYS[0]}`, 'confirmed');
 
 const GMGN_JSON_PATH = process.env.GMGN_JSON_PATH;
 const SOL = 'So11111111111111111111111111111111111111112';
@@ -149,6 +157,36 @@ export async function scanTokens() {
     console.log(`  Pool    : ${pool.address}`);
     console.log(`  Liq     : ${fmtUsd(pool.liquidity)} | APR: ${pool.apr.toFixed(1)}% | Fee24h: ${fmtUsd(pool.fees24h)}`);
 
+    // ── CEK BIN ARRAYS — pool baru akan kena non-refundable rent ~0.07 SOL ──
+    try {
+      const dlmm = await DLMM.create(_conn, new PublicKey(pool.address));
+      const activeBin = await dlmm.getActiveBin();
+      const RANGE_BINS = parseInt(process.env.RANGE_BINS || '50');
+      const isSolX = pool.mintX === SOL;
+      const minBinId = isSolX ? activeBin.binId + 1 : activeBin.binId - RANGE_BINS;
+      const maxBinId = isSolX ? activeBin.binId + RANGE_BINS : activeBin.binId - 1;
+
+      const binArrayKeys = await getBinArrayKeysCoverage(
+        new PublicKey(pool.address),
+        dlmm.program.programId,
+        new BN(minBinId),
+        new BN(maxBinId)
+      );
+
+      // Cek apakah bin array accounts sudah exist di chain
+      const accountInfos = await _conn.getMultipleAccountsInfo(binArrayKeys);
+      const missingCount = accountInfos.filter(a => a === null).length;
+
+      if (missingCount > 0) {
+        console.log(`  ❌ REJECT: Pool baru — ${missingCount} bin array belum ada di chain → non-refundable ~0.07 SOL`);
+        results.rejected.new_pool = (results.rejected.new_pool || 0) + 1;
+        continue;
+      }
+      console.log(`  ✅ Bin arrays sudah exist (${binArrayKeys.length} arrays) — tidak kena non-refundable`);
+    } catch (e) {
+      console.log(`  ⚠️ Gagal cek bin arrays (${e.message}) — lanjut dengan risiko`);
+    }
+
     // Filter liquidity (Dimatikan atas request)
     // if (pool.liquidity < MIN_POOL_LIQUIDITY) {
     //   console.log(`  ❌ REJECT: Liquidity terlalu kecil (${fmtUsd(pool.liquidity)} < ${fmtUsd(MIN_POOL_LIQUIDITY)})`);
@@ -181,7 +219,7 @@ export async function scanTokens() {
   }
 
   console.log(`\n${separator}`);
-  console.log(`[Scanner] Hasil: ${results.scanned} scanned | ${results.passed.length} lolos | rejected: MC=${results.rejected.mc_too_large||0} Spike5m=${results.rejected.price_spike||0} Spike1h=${results.rejected.price_spike_1h||0} NoPool=${results.rejected.no_pool||0} LowLiq=${results.rejected.low_liquidity||0} Cookin=${results.rejected.cookin_reject||0}`);
+  console.log(`[Scanner] Hasil: ${results.scanned} scanned | ${results.passed.length} lolos | rejected: MC=${results.rejected.mc_too_large||0} Spike5m=${results.rejected.price_spike||0} Spike1h=${results.rejected.price_spike_1h||0} NoPool=${results.rejected.no_pool||0} LowLiq=${results.rejected.low_liquidity||0} Cookin=${results.rejected.cookin_reject||0} NewPool=${results.rejected.new_pool||0}`);
   console.log(separator);
 
   return results;

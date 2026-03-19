@@ -805,6 +805,7 @@ async function runCycle() {
       `• Spike 5m: ${rejected.price_spike || 0}\n` +
       `• Spike 1h: ${rejected.price_spike_1h || 0}\n` +
       `• No pool Meteora: ${rejected.no_pool || 0}\n` +
+      `• Pool baru (non-refundable): ${rejected.new_pool || 0}\n` +
       `• Liq kecil: ${rejected.low_liquidity || 0}\n` +
       `• Cookin reject: ${rejected.cookin_reject || 0}\n` +
       `${cookinDetailsStr}\n\n` +
@@ -851,6 +852,21 @@ async function runCycle() {
     if (!supportData) return;
     const s = loadState();
     if (!s.activePosition) return;
+
+    // Validasi: support level harus LEBIH RENDAH dari entry price
+    // Kalau support >= entry price → tidak valid, tidak dipakai
+    const entryPrice = s.activePosition.entryPrice;
+    if (supportData.supportLevelSol >= entryPrice) {
+      console.log(`[Support] SKIP — support level (${fmtPrice(supportData.supportLevelSol)}) >= entry price (${fmtPrice(entryPrice)}). Tidak valid.`);
+      sendTelegram(
+        `⚠️ <b>Support Level Tidak Valid</b>\n` +
+        `Token: <b>${best.symbol}</b>\n` +
+        `Support: <b>${fmtPrice(supportData.supportLevelSol)}</b> ≥ Entry: <b>${fmtPrice(entryPrice)}</b>\n` +
+        `Support level diabaikan — pakai SL % biasa.`
+      );
+      return;
+    }
+
     s.activePosition.supportLevelSol = supportData.supportLevelSol;
     s.activePosition.supportLevelUsd = supportData.supportLevelUsd;
     s.activePosition.supportHolderCount = supportData.holderCount;
