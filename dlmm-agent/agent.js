@@ -19,6 +19,7 @@ const EMERGENCY_STOP_LOSS_PCT = parseFloat(process.env.EMERGENCY_STOP_LOSS_PCT |
 const TAKE_PROFIT_PCT = parseFloat(process.env.TAKE_PROFIT_PCT || '10');
 const FEE_CLAIM_THRESHOLD_SOL = parseFloat(process.env.FEE_CLAIM_THRESHOLD_SOL || '0.03');
 const CYCLE_INTERVAL_SEC = parseInt(process.env.CYCLE_INTERVAL_SEC || '300');
+const SL_GRACE_PERIOD_MIN = parseFloat(process.env.SL_GRACE_PERIOD_MIN || '1'); // menit pertama setelah open, SL/TP tidak aktif
 const AUTO_SWAP = process.env.AUTO_SWAP === 'true';
 const BUDGET_SOL = parseFloat(process.env.BUDGET_SOL || '0.5');
 const OOR_ABOVE_LIMIT_MIN = parseFloat(process.env.OOR_ABOVE_LIMIT_MIN || '60');
@@ -337,6 +338,11 @@ async function monitorTick() {
     return;
   }
 
+  if (data.error === 'data_not_settled') {
+    console.log('[MonitorTick] Data belum settle (totalValue ~0), skip tick ini.');
+    return;
+  }
+
   const { inRange, pnlSol, pnlPct, totalFeeSol, currentPrice, activeBinId } = data;
 
   // Prioritaskan angka Meteora datapi
@@ -400,6 +406,13 @@ async function monitorTick() {
     ? (Date.now() - pos_state.outOfRangeSince) / 60000 : 0;
 
   console.log(`  [Tick] PnL: ${fmtPct(estPnlPct)} | Fee: ${fmtSol(displayFeeSol)} SOL | InRange: ${inRange} | OOR: ${outOfRangeMinutes.toFixed(1)}min | Support: ${pos_state.supportLevelSol ? fmtPrice(pos_state.supportLevelSol) : 'N/A'}`);
+
+  // ── GRACE PERIOD — SL/TP tidak aktif di menit pertama setelah open
+  const holdMin = (Date.now() - pos_state.openedAt) / 60000;
+  if (holdMin < SL_GRACE_PERIOD_MIN) {
+    console.log(`  [Grace] Hold ${holdMin.toFixed(1)}min < ${SL_GRACE_PERIOD_MIN}min — SL/TP belum aktif`);
+    return;
+  }
 
   // ── SUPPORT LEVEL BROKEN — jika support level tersedia, ini MENGGANTIKAN SL %
   if (pos_state.supportLevelSol && estPnlPct < 0) {

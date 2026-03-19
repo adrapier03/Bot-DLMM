@@ -175,8 +175,15 @@ export async function monitorPosition(state) {
   const pnlSol = (totalValueSol + totalFeeSol) - state.budgetSol;
   const pnlPct = (pnlSol / state.budgetSol) * 100;
 
+  console.log(`  [Monitor] solInPos=${solInPos.toFixed(6)} tokenInPos=${tokenInPos.toFixed(6)} tokenValue=${tokenValueSol.toFixed(6)} totalValue=${totalValueSol.toFixed(6)} pnl=${pnlPct.toFixed(2)}%`);
+
   // Sanity check — guard against bad decimal/price orientation spikes
-  // Keep monitor stable so TP/SL tidak ke-trigger palsu.
+  // Jika totalValueSol hampir 0 padahal budgetSol > 0 → kemungkinan data RPC belum settle, skip
+  if (totalValueSol < state.budgetSol * 0.05 && totalFeeSol < state.budgetSol * 0.05) {
+    console.log(`  [Monitor] totalValueSol terlalu kecil (${totalValueSol.toFixed(6)}) — kemungkinan data belum settle, skip tick ini`);
+    return { error: 'data_not_settled' };
+  }
+
   const safePnlPct = Math.abs(pnlPct) > 100 ? 0 : pnlPct;
   const safePnlSol = Math.abs(pnlSol) > state.budgetSol * 2 ? 0 : pnlSol;
 
