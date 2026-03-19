@@ -75,7 +75,7 @@ Project ini menggabungkan 2 komponen dalam **1 folder**:
 - Jika ada posisi aktif:
   - **Monitor Tick** (tiap `MONITOR_INTERVAL_SEC`, default 2 detik): cek PnL realtime, trigger TP/SL/OOR
   - **Cycle** (tiap `CYCLE_INTERVAL_SEC`, default 60 detik): cek volume, TVL, kirim status Telegram
-  - PnL diambil dari **Meteora datapi** (cocok sama angka di UI Meteora) — bukan estimasi lokal
+  - PnL dihitung via **`getBinsBetweenLowerAndUpperBound`** — valuasi per-bin dengan harga masing-masing bin (bukan active bin price saja), jauh lebih akurat terutama saat posisi OOR sebagian
   - opsional swap token sisa ke SOL via Jupiter Ultra API setelah close
 - Kirim update ke Telegram (start, scan, open, status, close, crash).
 
@@ -95,7 +95,7 @@ Bot punya **9 kondisi** yang bisa trigger close otomatis. Dicek di 2 tempat berb
 |---|---|---|---|
 | 🔻 `SUPPORT_BROKEN` | Harga < avg buy top 10 holders & PnL minus | Dinamis (hasil scrape GMGN) | **SL utama** — menggantikan SL % jika data tersedia |
 | 🛑 `STOP_LOSS` | PnL ≤ -N% | `STOP_LOSS_PCT=10` → **-10%** | **Fallback only** — hanya aktif jika support level tidak ada |
-| 🛑 `EMERGENCY_STOP_LOSS` | PnL ≤ -N% | `EMERGENCY_STOP_LOSS_PCT=25` → **-25%** | **Selalu aktif** meski ada support level — batas kerugian mutlak |
+| 🛑 `EMERGENCY_STOP_LOSS` | PnL ≤ -N% | `EMERGENCY_STOP_LOSS_PCT=17` → **-17%** | **Selalu aktif** meski ada support level — batas kerugian mutlak |
 | 🎉 `TAKE_PROFIT` | PnL ≥ +N% | `TAKE_PROFIT_PCT=2` → **+2%** | Langsung close begitu nyentuh angka ini |
 | 😐 `PNL_STUCK` | PnL nyentuh +1% tapi tidak naik ke TP dalam 2 menit | `PNL_STUCK_THRESHOLD_PCT=1`, `PNL_STUCK_TIMEOUT_MIN=2` | Close selagi masih profit — timer reset jika PnL turun di bawah threshold |
 | 📈 `OOR_ABOVE` | Harga pump keluar range atas > N menit | `OOR_ABOVE_LIMIT_MIN=5` → **5 menit** | Cek volume dulu — jika volume masih deres → **re-open** di range baru |
@@ -217,3 +217,29 @@ npm run restart:bg
 - **Bot dobel notif** → cek duplicate process, lalu jalankan `npm run restart:bg`.
 - **No candidate terus** → longgarkan filter spike/liquidity/cookin.
 - **Crash** → lihat tail `dlmm-agent/agent.log`.
+
+---
+
+## Changelog
+
+### 2026-03-18
+- **[FIX] PnL Calculation — Per-Bin Valuation** (`meteora.js`)
+  - Sebelumnya: valuasi token pakai `activeBin.price` untuk semua token di posisi → estimasi tidak akurat (bisa meleset 4-6%)
+  - Sekarang: pakai `getBinsBetweenLowerAndUpperBound` → hitung value per-bin dengan harga masing-masing bin → estimasi PnL jauh lebih presisi
+  - Ada fallback ke cara lama jika SDK gagal (auto-detect, log `[Monitor] fallback`)
+  - Backup file: `meteora.js.bak.20260318_190929`
+
+- **[CONFIG] Emergency Stop Loss diperketat**
+  - `EMERGENCY_STOP_LOSS_PCT`: 25% → **17%**
+
+- **[CONFIG] OpenClaw Compaction Mode**
+  - `compaction.mode`: `default` → `safeguard` (context session lebih panjang sebelum dikompres)
+
+- **[NOTED] Bug display: notif telat setelah close**
+  - Position Update masih terkirim 1-2x setelah posisi sudah closed
+  - Root cause: `runCycle` kirim status pakai data lama sebelum sempat baca state baru
+  - Status: **identified**, belum difix (low priority)
+
+- **[NOTED] Label "Stop Loss" padahal PnL positif**
+  - Estimasi PnL saat trigger berbeda dengan realized PnL saat close selesai
+  - Sekarang sebagian besar resolved oleh fix per-bin valuation di atas

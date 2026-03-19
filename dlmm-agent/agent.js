@@ -186,6 +186,12 @@ async function checkTvlDilution(state) {
   console.log(`  [TVL] Current: ${fmtUsd(currentTvl)} | Threshold: ${fmtUsd(TVL_DILUTED_THRESHOLD_USD)} | Hold: ${holdMin.toFixed(1)}min`);
 
   if (currentTvl >= TVL_DILUTED_THRESHOLD_USD) {
+    // Skip jika PnL masih minus — tunggu recovery dulu
+    const currentPnlPct = pos_state._lastPnlPct ?? 0;
+    if (currentPnlPct < 0) {
+      console.log(`  [TVL] DILUTED tapi PnL masih minus (${fmtPct(currentPnlPct)}) — skip, tunggu recovery`);
+      return false;
+    }
     console.log(`  [TVL] DILUTED! TVL ${fmtUsd(currentTvl)} >= ${fmtUsd(TVL_DILUTED_THRESHOLD_USD)} setelah ${holdMin.toFixed(1)}min`);
     return true;
   }
@@ -481,10 +487,16 @@ async function monitorTick() {
         try {
           await closePosition(pos_state);
         } catch (e) {
-          console.error('[ReOpen] Close error:', e.message);
-          await sendTelegram(`❌ <b>Gagal close untuk re-open!</b>\nError: ${e.message}`);
-          monitorLoopActive = true;
-          return;
+          // Kalau posisi sudah tidak ada di chain → anggap sudah closed, lanjut re-open
+          const isAlreadyClosed = e.message?.includes('3007') || e.message?.includes('position_not_found') || e.message?.includes('not found');
+          if (isAlreadyClosed) {
+            console.log('[ReOpen] Posisi sudah tidak ada di chain, lanjut re-open...');
+          } else {
+            console.error('[ReOpen] Close error:', e.message);
+            await sendTelegram(`❌ <b>Gagal close untuk re-open!</b>\nError: ${e.message}`);
+            monitorLoopActive = true;
+            return;
+          }
         }
 
         // Tunggu settlement
@@ -559,11 +571,12 @@ async function monitorTick() {
           (newPosData.txHash2 ? ` | <a href="https://solscan.io/tx/${newPosData.txHash2}">TX Layer 2</a>` : '')
         );
 
+        // Pastikan loop lama benar-benar berhenti sebelum start loop baru
+        monitorLoopActive = false;
+        await new Promise(r => setTimeout(r, 2000));
         startMonitorLoop();
         return;
       }
-
-      // Volume sepi atau sudah max re-open → close total
       if (reopenCount >= OOR_ABOVE_MAX_REOPEN) {
         console.log(`[Action] OOR_ABOVE — max re-open (${reopenCount}) tercapai, close total.`);
       } else {
@@ -610,6 +623,13 @@ async function checkVolume(state) {
   }
 
   if (vol5m < VOL_DRY_THRESHOLD_USD) {
+    // Skip VOL_DRY jika PnL masih minus — tunggu recovery dulu
+    const currentPnlPct = pos_state._lastPnlPct ?? 0;
+    if (currentPnlPct < 0) {
+      console.log(`  [VolDry] Volume sepi tapi PnL minus (${fmtPct(currentPnlPct)}) — skip VOL_DRY, tunggu recovery`);
+      return false;
+    }
+
     pos_state.volDryCycles = (pos_state.volDryCycles || 0) + 1;
     console.log(`  [VolDry] Low volume cycle ${pos_state.volDryCycles}/${VOL_DRY_CYCLES}`);
     if (pos_state.volDryCycles === 1) {
@@ -634,7 +654,10 @@ async function checkVolume(state) {
 
 // ─── MONITOR LOOP — jalan tiap MONITOR_INTERVAL_SEC selama ada posisi ────────
 async function startMonitorLoop() {
-  if (monitorLoopActive) return; // sudah jalan, skip
+  if (monitorLoopActive) {
+    console.log('[MonitorLoop] Already active, skip duplicate start.');
+    return;
+  }
   monitorLoopActive = true;
   console.log(`[MonitorLoop] Started — interval ${MONITOR_INTERVAL_SEC}s`);
 
@@ -847,6 +870,7 @@ async function runCycle() {
     `Entry price: <b>${fmtPrice(posData.entryPrice)}</b>\n` +
     `Range: Bin ${posData.minBinId} → ${posData.maxBinId} (${Math.abs(posData.maxBinId - posData.minBinId)} bins)\n` +
     `Modal: <b>${posData.budgetSol} SOL</b>\n` +
+    `💰 Balance sebelum open: <b>${fmtSol(balanceSol)} SOL</b>\n` +
     `Layer 1 (70% BidAsk): <a href="https://solscan.io/tx/${posData.txHash}">TX1</a>\n` +
     (posData.txHash2 ? `Layer 2 (30% Spot): <a href="https://solscan.io/tx/${posData.txHash2}">TX2</a>` : `Layer 2: skipped`) +
     (best.cookin ? `\n${formatCookinSummary(best.cookin)}` : '')
@@ -888,6 +912,16 @@ async function handleClose(state, pos_state, reason, pnlSol, pnlPct, totalFeeSol
   try {
     await closePosition(pos_state);
   } catch (e) {
+    // Kalau posisi sudah tidak ada di chain → anggap sudah closed, lanjut cleanup
+    const isAlreadyClosed = e.message?.includes('3007') || e.message?.includes('position_not_found') || e.message?.includes('not found');
+    if (isAlreadyClosed) {
+      console.log('[Close] Posisi sudah tidak ada di chain, anggap sudah closed. Lanjut cleanup...');
+      state.activePosition = null;
+      saveState(state);
+      monitorLoopActive = false;
+      await sendTelegram(`⚠️ <b>Posisi sudah tidak ada di chain</b>\nToken: <b>${pos_state.symbol}</b>\nKemungkinan sudah closed sebelumnya. State dibersihkan.`);
+      return;
+    }
     console.error('[Close] Error:', e.message);
     await sendTelegram(`❌ <b>Gagal close!</b>\nError: ${e.message}\nClose manual ya!`);
     return;
@@ -1016,7 +1050,8 @@ async function handleClose(state, pos_state, reason, pnlSol, pnlPct, totalFeeSol
     `Durasi: ${duration} menit\n` +
     `PnL Realized: <b>${fmtPct(realizedPnlPct)} (${fmtSol(realizedPnlSol)} SOL)</b>\n` +
     `Fee (est): ${fmtSol(totalFeeSol)} SOL` +
-    tokenBreakdownLine + `\n`;
+    tokenBreakdownLine + `\n` +
+    `💰 Balance setelah close+swap: <b>${fmtSol(afterCloseSol)} SOL</b>\n`;
 
   if (swapResult) {
     msg += `\n🔄 Auto-swap: +${fmtSol(swapResult.outSol)} SOL\n`;
