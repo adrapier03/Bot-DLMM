@@ -10,14 +10,10 @@ const walletFile = JSON.parse(fs.readFileSync('./wallet.json', 'utf8'));
 export const wallet = Keypair.fromSecretKey(new Uint8Array(walletFile));
 
 // ─── RPC ROTATION (round-robin, proactive) ───────────────────────────────────
-const RPC_KEYS = [
-  'bf913512-1940-403c-8689-513d9424e57f', // key lama
-  '5b4de084-7e1b-4cbe-bc71-dd93de01e561',
-  '78be8195-17de-43a2-8305-bc9b5887500a',
-  '83a0cc8a-8253-4d6c-9f23-2092880d2b9b',
-  '1cd184e9-3336-406d-a2d9-c4c3b06ba187',
-];
-const RPC_URLS = RPC_KEYS.map(k => `https://mainnet.helius-rpc.com/?api-key=${k}`);
+const HELIUS_API_KEYS = process.env.HELIUS_API_KEYS
+  ? process.env.HELIUS_API_KEYS.split(',').map(k => k.trim())
+  : [process.env.HELIUS_API_KEY || 'bf913512-1940-403c-8689-513d9424e57f'];
+const RPC_URLS = HELIUS_API_KEYS.map(k => `https://mainnet.helius-rpc.com/?api-key=${k}`);
 let _rpcIdx = 0;
 export function getConnection() {
   const url = RPC_URLS[_rpcIdx % RPC_URLS.length];
