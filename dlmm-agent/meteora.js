@@ -19,16 +19,9 @@ export function getConnection() {
   const url = RPC_URLS[_rpcIdx % RPC_URLS.length];
   _rpcIdx++;
   return new Connection(url, 'confirmed');
-
 }
 // Backward compat — default connection untuk balance check dll
 export const connection = getConnection();
-
-// ─── BIN DATA CACHE (5 detik TTL) ─────────────────────────────────────────────
-let _binDataCache = null;
-let _binDataCachedAt = 0;
-let _binDataCacheKey = ''; // invalidate kalau posisi/pool beda
-const BIN_CACHE_TTL_MS = 5000;
 
 const RANGE_BINS = parseInt(process.env.RANGE_BINS || '70');
 const BUDGET_SOL = parseFloat(process.env.BUDGET_SOL || '0.5');
@@ -49,107 +42,87 @@ export async function openPosition(token) {
   const { mint, symbol, pool } = token;
   const poolPubkey = new PublicKey(pool.address);
   const dlmm = await DLMM.create(getConnection(), poolPubkey);
+  const activeBin = await dlmm.getActiveBin();
 
   const isSolX = pool.mintX === SOL_MINT;
   const tokenDecimals = await getTokenDecimals(mint);
+  // DLMM activeBin.price default basis assumes SOL(9) vs token decimals;
+  // normalize to SOL per 1 token (human) for consistent display/PnL math.
+  const entryPrice = parseFloat(activeBin.price) * Math.pow(10, tokenDecimals - 9);
   const budgetLamports = Math.floor(BUDGET_SOL * 1e9);
   const amount70 = new BN(Math.floor(budgetLamports * 0.7));
   const amount30 = new BN(Math.floor(budgetLamports * 0.3));
 
-  const MAX_OPEN_RETRIES = 3;
-  const OPEN_RETRY_DELAY_MS = 2000;
-
-  for (let attempt = 1; attempt <= MAX_OPEN_RETRIES; attempt++) {
-    // Fetch active bin fresh tiap attempt — harga bisa bergeser antar retry
-    const activeBin = await dlmm.getActiveBin();
-    const entryPrice = parseFloat(activeBin.price) * Math.pow(10, tokenDecimals - 9);
-
-    let minBinId, maxBinId;
-    if (!isSolX) {
-      maxBinId = activeBin.binId - 1;
-      minBinId = activeBin.binId - RANGE_BINS;
-    } else {
-      minBinId = activeBin.binId + 1;
-      maxBinId = activeBin.binId + RANGE_BINS;
-    }
-
-    const newPositionKeypair = Keypair.generate();
-
-    try {
-      // Layer 1: 70% BidAsk
-      console.log(`[Open] Attempt #${attempt} | Active bin: ${activeBin.binId} | Range: ${minBinId} → ${maxBinId}`);
-      console.log(`[Open] Layer 1 (70% BidAsk): ${amount70.toString()} lamports`);
-      const tx1 = await dlmm.initializePositionAndAddLiquidityByStrategy({
-        positionPubKey: newPositionKeypair.publicKey,
-        user: wallet.publicKey,
-        totalXAmount: isSolX ? amount70 : new BN(0),
-        totalYAmount: isSolX ? new BN(0) : amount70,
-        strategy: { maxBinId, minBinId, strategyType: StrategyType.BidAsk },
-      });
-
-      const txHash1 = await sendAndConfirmTransaction(getConnection(), tx1, [wallet, newPositionKeypair], {
-        skipPreflight: true, commitment: 'confirmed',
-      });
-      console.log(`[Open] Layer 1 TX: ${txHash1}`);
-
-      // Save state immediately after layer 1
-      const posData = {
-        positionKey: newPositionKeypair.publicKey.toBase58(),
-        poolAddress: pool.address,
-        mint,
-        symbol,
-        entryPrice,
-        entryBin: activeBin.binId,
-        minBinId,
-        maxBinId,
-        isSolX,
-        budgetSol: BUDGET_SOL,
-        txHash: txHash1,
-        txHash2: null,
-        openedAt: Date.now(),
-        outOfRangeSince: null,
-        oorDirection: null,
-      };
-
-      if (token._onPositionCreated) token._onPositionCreated(posData);
-
-      // Layer 2: 30% Spot
-      await new Promise(r => setTimeout(r, 3000));
-      console.log(`[Open] Layer 2 (30% Spot): ${amount30.toString()} lamports`);
-      try {
-        const tx2 = await dlmm.addLiquidityByStrategy({
-          positionPubKey: newPositionKeypair.publicKey,
-          user: wallet.publicKey,
-          totalXAmount: isSolX ? amount30 : new BN(0),
-          totalYAmount: isSolX ? new BN(0) : amount30,
-          strategy: { maxBinId, minBinId, strategyType: StrategyType.Spot },
-        });
-        const txHash2 = await sendAndConfirmTransaction(getConnection(), tx2, [wallet], {
-          skipPreflight: true, commitment: 'confirmed',
-        });
-        posData.txHash2 = txHash2;
-        console.log(`[Open] Layer 2 TX: ${txHash2}`);
-      } catch (e) {
-        console.error('[Open] Layer 2 failed (position still valid):', e.message);
-      }
-
-      // Layer 1 sukses → return posData
-      return posData;
-
-    } catch (e) {
-      const isSlippageError = e.message?.includes('Custom:1') || e.message?.includes('SlippageExceeded') || e.message?.includes('custom program error: 0x1');
-      if (isSlippageError && attempt < MAX_OPEN_RETRIES) {
-        console.log(`[Open] Attempt #${attempt} gagal — active bin bergeser (${e.message}). Retry dalam ${OPEN_RETRY_DELAY_MS / 1000}s...`);
-        await new Promise(r => setTimeout(r, OPEN_RETRY_DELAY_MS));
-        continue; // fetch active bin baru di attempt berikutnya
-      }
-      // Error lain atau sudah habis retry → throw
-      console.error(`[Open] Gagal setelah ${attempt} attempt: ${e.message}`);
-      throw e;
-    }
+  let minBinId, maxBinId;
+  if (!isSolX) {
+    maxBinId = activeBin.binId - 1;
+    minBinId = activeBin.binId - RANGE_BINS;
+  } else {
+    minBinId = activeBin.binId + 1;
+    maxBinId = activeBin.binId + RANGE_BINS;
   }
 
-  throw new Error(`[Open] Gagal buka posisi setelah ${MAX_OPEN_RETRIES} attempts`);
+  const newPositionKeypair = Keypair.generate();
+
+  // Layer 1: 70% BidAsk
+  console.log(`[Open] Layer 1 (70% BidAsk): ${amount70.toString()} lamports`);
+  const tx1 = await dlmm.initializePositionAndAddLiquidityByStrategy({
+    positionPubKey: newPositionKeypair.publicKey,
+    user: wallet.publicKey,
+    totalXAmount: isSolX ? amount70 : new BN(0),
+    totalYAmount: isSolX ? new BN(0) : amount70,
+    strategy: { maxBinId, minBinId, strategyType: StrategyType.BidAsk },
+  });
+
+  const txHash1 = await sendAndConfirmTransaction(getConnection(), tx1, [wallet, newPositionKeypair], {
+    skipPreflight: true, commitment: 'confirmed',
+  });
+  console.log(`[Open] Layer 1 TX: ${txHash1}`);
+
+  // Save state immediately after layer 1 — before layer 2
+  // so even if layer 2 fails, we don't lose track of position
+  const posData = {
+    positionKey: newPositionKeypair.publicKey.toBase58(),
+    poolAddress: pool.address,
+    mint,
+    symbol,
+    entryPrice,
+    entryBin: activeBin.binId,
+    minBinId,
+    maxBinId,
+    isSolX,
+    budgetSol: BUDGET_SOL,
+    txHash: txHash1,
+    txHash2: null,
+    openedAt: Date.now(),
+    outOfRangeSince: null,
+    oorDirection: null,
+  };
+
+  // Yield posData early so caller can save state before layer 2
+  if (token._onPositionCreated) token._onPositionCreated(posData);
+
+  // Layer 2: 30% Spot
+  await new Promise(r => setTimeout(r, 3000));
+  console.log(`[Open] Layer 2 (30% Spot): ${amount30.toString()} lamports`);
+  try {
+    const tx2 = await dlmm.addLiquidityByStrategy({
+      positionPubKey: newPositionKeypair.publicKey,
+      user: wallet.publicKey,
+      totalXAmount: isSolX ? amount30 : new BN(0),
+      totalYAmount: isSolX ? new BN(0) : amount30,
+      strategy: { maxBinId, minBinId, strategyType: StrategyType.Spot },
+    });
+    const txHash2 = await sendAndConfirmTransaction(getConnection(), tx2, [wallet], {
+      skipPreflight: true, commitment: 'confirmed',
+    });
+    posData.txHash2 = txHash2;
+    console.log(`[Open] Layer 2 TX: ${txHash2}`);
+  } catch (e) {
+    console.error('[Open] Layer 2 failed (position still valid):', e.message);
+  }
+
+  return posData;
 }
 
 export async function monitorPosition(state) {
@@ -171,105 +144,39 @@ export async function monitorPosition(state) {
   const tokenDivisor = Math.pow(10, tokenDecimals);
 
   // Normalize DLMM price to SOL per 1 token (human).
+  // Without this scale fix, token with 6 decimals appears 1000x terlalu besar.
   const rawBinPrice = parseFloat(activeBin.price);
   const currentPrice = rawBinPrice * Math.pow(10, tokenDecimals - 9);
   const inRange = activeBin.binId >= lowerBinId && activeBin.binId <= upperBinId;
 
-  // feeX/feeY
-  let feeSol, feeToken;
+  // feeX = token side (raw, pakai tokenDivisor)
+  // feeY = SOL side (raw lamports, pakai 1e9)
+  // totalXAmount/totalYAmount sama
+  let solInPos, tokenInPos, feeSol, feeToken;
   if (!state.isSolX) {
-    feeToken = new BN(feeX).toNumber() / tokenDivisor;
-    feeSol   = new BN(feeY).toNumber() / 1e9;
+    // X = token, Y = SOL
+    tokenInPos = new BN(totalXAmount).toNumber() / tokenDivisor;
+    solInPos   = new BN(totalYAmount).toNumber() / 1e9;
+    feeToken   = new BN(feeX).toNumber() / tokenDivisor;
+    feeSol     = new BN(feeY).toNumber() / 1e9;
   } else {
-    feeSol   = new BN(feeX).toNumber() / 1e9;
-    feeToken = new BN(feeY).toNumber() / tokenDivisor;
+    // X = SOL, Y = token
+    solInPos   = new BN(totalXAmount).toNumber() / 1e9;
+    tokenInPos = new BN(totalYAmount).toNumber() / tokenDivisor;
+    feeSol     = new BN(feeX).toNumber() / 1e9;
+    feeToken   = new BN(feeY).toNumber() / tokenDivisor;
   }
 
-  // ── ACCURATE VALUATION: hitung value per-bin pakai harga masing-masing bin ──
-  // Cache 5 detik agar tidak hammer RPC tiap 2 detik
-  let totalValueSol = 0;
-  let solInPos = 0;
-  let tokenInPos = 0;
-
-  const cacheKey = `${state.positionKey}:${lowerBinId}:${upperBinId}`;
-  const now = Date.now();
-  const cacheHit = _binDataCache && _binDataCacheKey === cacheKey && (now - _binDataCachedAt) < BIN_CACHE_TTL_MS;
-
-  try {
-    let bins;
-    if (cacheHit) {
-      bins = _binDataCache;
-    } else {
-      const result = await dlmm.getBinsBetweenLowerAndUpperBound(lowerBinId, upperBinId);
-      bins = result.bins;
-      _binDataCache = bins;
-      _binDataCachedAt = now;
-      _binDataCacheKey = cacheKey;
-    }
-
-    for (const bin of bins) {
-      // Harga per bin: rawBinPrice * scale fix (sama seperti currentPrice tapi per-bin)
-      const binRawPrice = parseFloat(bin.price);
-      const binPriceSol = binRawPrice * Math.pow(10, tokenDecimals - 9);
-
-      // Jumlah token/SOL di bin ini (dari liquiditySupply & perbandingan posisi)
-      // Meteora bin expose xAmount & yAmount dalam raw
-      const binXRaw = bin.xAmount ? new BN(bin.xAmount).toNumber() : 0;
-      const binYRaw = bin.yAmount ? new BN(bin.yAmount).toNumber() : 0;
-
-      let binSol, binToken;
-      if (!state.isSolX) {
-        // X = token, Y = SOL
-        binToken = binXRaw / tokenDivisor;
-        binSol   = binYRaw / 1e9;
-      } else {
-        // X = SOL, Y = token
-        binSol   = binXRaw / 1e9;
-        binToken = binYRaw / tokenDivisor;
-      }
-
-      solInPos   += binSol;
-      tokenInPos += binToken;
-      totalValueSol += binSol + (binToken * binPriceSol);
-    }
-
-    // Sanity fallback: kalau per-bin data kosong/nol, fallback ke simple valuation
-    // Ini terjadi saat OOR — token di bin sudah converted ke SOL semua, bin kelihatan kosong
-    if (totalValueSol === 0) {
-      console.log('  [Monitor] Per-bin valuation returned 0 (kemungkinan OOR), fallback ke simple valuation');
-      const tokenInPosSimple = !state.isSolX
-        ? new BN(totalXAmount).toNumber() / tokenDivisor
-        : new BN(totalYAmount).toNumber() / tokenDivisor;
-      const solInPosSimple = !state.isSolX
-        ? new BN(totalYAmount).toNumber() / 1e9
-        : new BN(totalXAmount).toNumber() / 1e9;
-      solInPos = solInPosSimple;
-      tokenInPos = tokenInPosSimple;
-      // Saat OOR Above: posisi mayoritas SOL (token habis dijual ke SOL)
-      // Saat OOR Below: posisi mayoritas token (SOL habis dipakai beli token)
-      // Pakai active bin price untuk valuasi token sisa
-      totalValueSol = solInPosSimple + (tokenInPosSimple * currentPrice);
-      // Invalidate cache supaya tick berikutnya fetch ulang
-      _binDataCache = null;
-      _binDataCachedAt = 0;
-    }
-  } catch (e) {
-    // Fallback ke cara lama jika getBinsBetweenLowerAndUpperBound gagal
-    console.log(`  [Monitor] Per-bin valuation failed (${e.message}), fallback to simple valuation`);
-    tokenInPos = !state.isSolX
-      ? new BN(totalXAmount).toNumber() / tokenDivisor
-      : new BN(totalYAmount).toNumber() / tokenDivisor;
-    solInPos = !state.isSolX
-      ? new BN(totalYAmount).toNumber() / 1e9
-      : new BN(totalXAmount).toNumber() / 1e9;
-    totalValueSol = solInPos + (tokenInPos * currentPrice);
-  }
-
-  const totalFeeSol = feeSol + feeToken * currentPrice;
+  // currentPrice = SOL per 1 token (pakai activeBin.price yang sudah human-readable)
+  // feeToken sudah human-readable → perkalian konsisten
+  const tokenValueSol = tokenInPos * currentPrice;
+  const totalValueSol = solInPos + tokenValueSol;
+  const totalFeeSol   = feeSol + feeToken * currentPrice;
   const pnlSol = (totalValueSol + totalFeeSol) - state.budgetSol;
   const pnlPct = (pnlSol / state.budgetSol) * 100;
 
   // Sanity check — guard against bad decimal/price orientation spikes
+  // Keep monitor stable so TP/SL tidak ke-trigger palsu.
   const safePnlPct = Math.abs(pnlPct) > 100 ? 0 : pnlPct;
   const safePnlSol = Math.abs(pnlSol) > state.budgetSol * 2 ? 0 : pnlSol;
 

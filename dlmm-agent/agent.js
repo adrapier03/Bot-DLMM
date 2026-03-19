@@ -35,6 +35,7 @@ const MONITOR_INTERVAL_SEC = parseInt(process.env.MONITOR_INTERVAL_SEC || '5');
 
 let cycleCount = 0;
 let monitorLoopActive = false; // flag agar hanya 1 monitor loop jalan
+let handleCloseInProgress = false; // guard agar handleClose tidak dipanggil 2x
 
 function loadState() {
   if (!fs.existsSync(STATE_FILE)) return { activePosition: null };
@@ -899,6 +900,13 @@ async function getTokenBalance(mint) {
 }
 
 async function handleClose(state, pos_state, reason, pnlSol, pnlPct, totalFeeSol) {
+  // Guard: pastikan tidak dipanggil 2x bersamaan (race condition antar tick)
+  if (handleCloseInProgress) {
+    console.log(`[handleClose] Already in progress, skip duplicate call (reason: ${reason})`);
+    return;
+  }
+  handleCloseInProgress = true;
+
   const duration = Math.floor((Date.now() - pos_state.openedAt) / 60000);
 
   const baselineSol = Number.isFinite(pos_state.walletBalanceBeforeOpenSol)
@@ -1061,6 +1069,7 @@ async function handleClose(state, pos_state, reason, pnlSol, pnlPct, totalFeeSol
   }
 
   await sendTelegram(msg);
+  handleCloseInProgress = false;
 }
 
 // ─── MAIN ────────────────────────────────────────────────────
