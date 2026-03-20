@@ -18,6 +18,7 @@ const SOL = 'So11111111111111111111111111111111111111112';
 
 // Filter dari .env
 const MIN_POOL_LIQUIDITY = parseFloat(process.env.MIN_POOL_LIQUIDITY || '50000');
+const MIN_TVL_USD = parseFloat(process.env.MIN_TVL_USD || '10000');
 const MAX_PRICE_CHANGE_5M = parseFloat(process.env.MAX_PRICE_CHANGE_5M || '15');
 const MAX_PRICE_CHANGE_1H = parseFloat(process.env.MAX_PRICE_CHANGE_1H || '50');
 const MAX_MC_USD = parseFloat(process.env.MAX_MC_USD || '2000000'); // reject jika MC >= 2M
@@ -163,14 +164,15 @@ export async function scanTokens() {
       const activeBin = await dlmm.getActiveBin();
       const RANGE_BINS = parseInt(process.env.RANGE_BINS || '50');
       const isSolX = pool.mintX === SOL;
-      const minBinId = isSolX ? activeBin.binId + 1 : activeBin.binId - RANGE_BINS;
-      const maxBinId = isSolX ? activeBin.binId + RANGE_BINS : activeBin.binId - 1;
+      const activeBinIdBN = new BN(activeBin.binId.toString());
+      const minBinId = isSolX ? activeBinIdBN.addn(1) : activeBinIdBN.subn(RANGE_BINS);
+      const maxBinId = isSolX ? activeBinIdBN.addn(RANGE_BINS) : activeBinIdBN.subn(1);
 
       const binArrayKeys = await getBinArrayKeysCoverage(
+        minBinId,
+        maxBinId,
         new PublicKey(pool.address),
-        dlmm.program.programId,
-        new BN(minBinId),
-        new BN(maxBinId)
+        dlmm.program.programId
       );
 
       // Cek apakah bin array accounts sudah exist di chain
@@ -185,6 +187,13 @@ export async function scanTokens() {
       console.log(`  ✅ Bin arrays sudah exist (${binArrayKeys.length} arrays) — tidak kena non-refundable`);
     } catch (e) {
       console.log(`  ⚠️ Gagal cek bin arrays (${e.message}) — lanjut dengan risiko`);
+    }
+
+    // Filter liquidity — reject jika TVL terlalu kecil
+    if (pool.liquidity < MIN_TVL_USD) {
+      console.log(`  ❌ REJECT: TVL terlalu kecil (${fmtUsd(pool.liquidity)} < ${fmtUsd(MIN_TVL_USD)})`);
+      results.rejected.low_tvl = (results.rejected.low_tvl || 0) + 1;
+      continue;
     }
 
     // Filter liquidity — reject jika TVL Meteora >= MIN_POOL_LIQUIDITY (terlalu besar)
@@ -219,7 +228,7 @@ export async function scanTokens() {
   }
 
   console.log(`\n${separator}`);
-  console.log(`[Scanner] Hasil: ${results.scanned} scanned | ${results.passed.length} lolos | rejected: MC=${results.rejected.mc_too_large||0} Spike5m=${results.rejected.price_spike||0} Spike1h=${results.rejected.price_spike_1h||0} NoPool=${results.rejected.no_pool||0} LowLiq=${results.rejected.low_liquidity||0} Cookin=${results.rejected.cookin_reject||0} NewPool=${results.rejected.new_pool||0}`);
+  console.log(`[Scanner] Hasil: ${results.scanned} scanned | ${results.passed.length} lolos | rejected: MC=${results.rejected.mc_too_large||0} LowTVL=${results.rejected.low_tvl||0} HighTVL=${results.rejected.high_liquidity||0} NoPool=${results.rejected.no_pool||0} Cookin=${results.rejected.cookin_reject||0} NewPool=${results.rejected.new_pool||0}`);
   console.log(separator);
 
   return results;

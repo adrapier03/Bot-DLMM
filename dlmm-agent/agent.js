@@ -2,6 +2,16 @@ import fs from 'fs';
 import dotenv from 'dotenv';
 dotenv.config();
 
+// ── Timestamp semua console.log ──────────────────────────────────────────────
+const _origLog = console.log.bind(console);
+const _origWarn = console.warn.bind(console);
+const _origError = console.error.bind(console);
+function _ts() { return new Date().toISOString().replace('T',' ').slice(0,19); }
+console.log   = (...a) => _origLog(`[${_ts()}]`, ...a);
+console.warn  = (...a) => _origWarn(`[${_ts()}]`, ...a);
+console.error = (...a) => _origError(`[${_ts()}]`, ...a);
+// ─────────────────────────────────────────────────────────────────────────────
+
 import axios from 'axios';
 import { sendTelegram } from './telegram.js';
 import { scanTokens } from './scanner.js';
