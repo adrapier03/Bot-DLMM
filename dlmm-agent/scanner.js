@@ -187,12 +187,12 @@ export async function scanTokens() {
       console.log(`  ⚠️ Gagal cek bin arrays (${e.message}) — lanjut dengan risiko`);
     }
 
-    // Filter liquidity (Dimatikan atas request)
-    // if (pool.liquidity < MIN_POOL_LIQUIDITY) {
-    //   console.log(`  ❌ REJECT: Liquidity terlalu kecil (${fmtUsd(pool.liquidity)} < ${fmtUsd(MIN_POOL_LIQUIDITY)})`);
-    //   results.rejected.low_liquidity = (results.rejected.low_liquidity || 0) + 1;
-    //   continue;
-    // }
+    // Filter liquidity — reject jika TVL Meteora >= MIN_POOL_LIQUIDITY (terlalu besar)
+    if (pool.liquidity >= MIN_POOL_LIQUIDITY) {
+      console.log(`  ❌ REJECT: TVL terlalu besar (${fmtUsd(pool.liquidity)} >= ${fmtUsd(MIN_POOL_LIQUIDITY)})`);
+      results.rejected.high_liquidity = (results.rejected.high_liquidity || 0) + 1;
+      continue;
+    }
 
     console.log(`  ✅ LOLOS filter GMGN+Meteora — cek Cookin.fun...`);
 

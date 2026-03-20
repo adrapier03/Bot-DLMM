@@ -479,6 +479,10 @@ async function monitorTick() {
 
   // ── OOR smart limit
   if (!inRange && outOfRangeMinutes >= oorLimit) {
+    // Set flag agar runCycle tidak kirim notif update dulu — langsung close
+    pos_state._oorLimitReached = true;
+    saveState(state);
+
     if (oorDir === 'ABOVE') {
       // Cek volume dulu sebelum close
       const vol5m = await fetchVol5m(pos_state.mint);
@@ -738,6 +742,12 @@ async function runCycle() {
       return;
     }
 
+    // ── OOR LIMIT REACHED — monitorTick sedang proses close, skip notif update
+    if (pos_state._oorLimitReached) {
+      console.log(`[runCycle] OOR limit reached — monitorTick sedang handle close, skip notif update`);
+      return;
+    }
+
     // ── TELEGRAM STATUS UPDATE (per cycle, pakai data terbaru dari monitorTick)
     const pnlPct = pos_state._lastPnlPct ?? null;
     const pnlUsd = pos_state._lastPnlUsd ?? null;
@@ -801,12 +811,11 @@ async function runCycle() {
       `🔍 <b>DLMM Scan #${cycleCount}</b>\n` +
       `Scanned: ${scanned} tokens | Lolos: 0\n\n` +
       `<b>Token yang discan:</b>\n${scannedList}\n\n` +
-      `Rejected:\n` +
-      `• Spike 5m: ${rejected.price_spike || 0}\n` +
-      `• Spike 1h: ${rejected.price_spike_1h || 0}\n` +
+      `<b>Rejected:</b>\n` +
+      `• MC terlalu besar: ${rejected.mc_too_large || 0}\n` +
       `• No pool Meteora: ${rejected.no_pool || 0}\n` +
       `• Pool baru (non-refundable): ${rejected.new_pool || 0}\n` +
-      `• Liq kecil: ${rejected.low_liquidity || 0}\n` +
+      `• TVL terlalu besar: ${rejected.high_liquidity || 0}\n` +
       `• Cookin reject: ${rejected.cookin_reject || 0}\n` +
       `${cookinDetailsStr}\n\n` +
       `😴 Belum ada token cocok...`
