@@ -15,6 +15,15 @@ const _conn = new Connection(`https://mainnet.helius-rpc.com/?api-key=${HELIUS_A
 
 const GMGN_JSON_PATH = process.env.GMGN_JSON_PATH;
 const SOL = 'So11111111111111111111111111111111111111112';
+const BLACKLIST_FILE = './blacklist.json';
+
+function loadBlacklist() {
+  try {
+    if (!fs.existsSync(BLACKLIST_FILE)) return new Set();
+    const data = JSON.parse(fs.readFileSync(BLACKLIST_FILE, 'utf8'));
+    return new Set(data.mints || []);
+  } catch { return new Set(); }
+}
 
 // Filter dari .env
 const MIN_POOL_LIQUIDITY = parseFloat(process.env.MIN_POOL_LIQUIDITY || '50000');
@@ -109,6 +118,14 @@ export async function scanTokens() {
     console.log(`  Δ1h     : ${priceChange1h >= 0 ? '+' : ''}${priceChange1h.toFixed(2)}% (max: ±${MAX_PRICE_CHANGE_1H}%)`);
 
     if (!mint) { console.log(`  ❌ REJECT: mint address tidak ada`); continue; }
+
+    // Filter blacklist — reject token yang di-blacklist manual
+    const blacklist = loadBlacklist();
+    if (blacklist.has(mint)) {
+      console.log(`  ❌ REJECT: Token di-blacklist (${symbol})`);
+      results.rejected.blacklisted = (results.rejected.blacklisted || 0) + 1;
+      continue;
+    }
 
     // Filter MC — reject jika MC >= MAX_MC_USD
     if (mc >= MAX_MC_USD) {
@@ -228,7 +245,7 @@ export async function scanTokens() {
   }
 
   console.log(`\n${separator}`);
-  console.log(`[Scanner] Hasil: ${results.scanned} scanned | ${results.passed.length} lolos | rejected: MC=${results.rejected.mc_too_large||0} LowTVL=${results.rejected.low_tvl||0} HighTVL=${results.rejected.high_liquidity||0} NoPool=${results.rejected.no_pool||0} Cookin=${results.rejected.cookin_reject||0} NewPool=${results.rejected.new_pool||0}`);
+  console.log(`[Scanner] Hasil: ${results.scanned} scanned | ${results.passed.length} lolos | rejected: MC=${results.rejected.mc_too_large||0} LowTVL=${results.rejected.low_tvl||0} HighTVL=${results.rejected.high_liquidity||0} NoPool=${results.rejected.no_pool||0} Cookin=${results.rejected.cookin_reject||0} NewPool=${results.rejected.new_pool||0} Blacklist=${results.rejected.blacklisted||0}`);
   console.log(separator);
 
   return results;

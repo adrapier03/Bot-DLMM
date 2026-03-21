@@ -3,6 +3,8 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const COOKIE_VALUE = process.env.COOKIN_COOKIE || '';
+const COOKIE_VISITOR = process.env.COOKIN_VISITOR || '';
+const COOKIE_GA = process.env.COOKIN_GA || '';
 const COOKIN_URL = 'https://cookin.fun';
 
 let browser = null;
@@ -10,18 +12,26 @@ let context = null;
 
 async function initBrowser() {
   if (!browser) {
-    browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
-    context = await browser.newContext();
-    if (COOKIE_VALUE) {
-      await context.addCookies([{
-        name: '_pump_key',
-        value: COOKIE_VALUE,
-        domain: 'cookin.fun',
-        path: '/',
-      }]);
-    }
+    browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled'] });
     console.log('[Cookin] Browser initialized');
   }
+  // Buat context baru tiap kali (fresh cookies)
+  if (context) { await context.close().catch(() => {}); }
+  context = await browser.newContext({
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36',
+    viewport: { width: 1280, height: 800 },
+    extraHTTPHeaders: {
+      'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
+      'sec-ch-ua': '"Not)A;Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"',
+      'sec-ch-ua-mobile': '?0',
+      'sec-ch-ua-platform': '"Windows"',
+    },
+  });
+  const cookies = [];
+  if (COOKIE_VALUE) cookies.push({ name: '_pump_key', value: COOKIE_VALUE, domain: 'cookin.fun', path: '/', httpOnly: true, secure: true });
+  if (COOKIE_VISITOR) cookies.push({ name: '_pump_visitor', value: COOKIE_VISITOR, domain: 'cookin.fun', path: '/', httpOnly: true, secure: true });
+  if (COOKIE_GA) cookies.push({ name: '_ga', value: COOKIE_GA, domain: 'cookin.fun', path: '/' });
+  if (cookies.length) await context.addCookies(cookies);
   return context;
 }
 
@@ -35,7 +45,16 @@ export async function scrapeCookinToken(mint) {
     const ctx = await initBrowser();
     const page = await ctx.newPage();
     await page.goto(`${COOKIN_URL}/token/${mint}`, { waitUntil: 'networkidle', timeout: 20000 });
-    await page.waitForTimeout(3000);
+    // Tunggu sampai placeholder "XX" hilang — data JS sudah load
+    try {
+      await page.waitForFunction(
+        () => !document.body.innerText.includes('Score: XX'),
+        { timeout: 10000 }
+      );
+    } catch {
+      // Timeout — mungkin memang tidak ada score, lanjut aja
+    }
+    await page.waitForTimeout(1000);
     const text = await page.evaluate(() => document.body.innerText);
     await page.close();
     return parseCookinData(text, mint);

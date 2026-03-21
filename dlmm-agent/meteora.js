@@ -55,11 +55,11 @@ export async function openPosition(token) {
 
   let minBinId, maxBinId;
   if (!isSolX) {
-    maxBinId = activeBin.binId - 1;
-    minBinId = activeBin.binId - RANGE_BINS;
+    maxBinId = activeBin.binId;
+    minBinId = activeBin.binId - 69;
   } else {
-    minBinId = activeBin.binId + 1;
-    maxBinId = activeBin.binId + RANGE_BINS;
+    minBinId = activeBin.binId;
+    maxBinId = activeBin.binId + 69;
   }
 
   const newPositionKeypair = Keypair.generate();

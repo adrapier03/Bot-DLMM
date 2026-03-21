@@ -42,11 +42,18 @@ const VOL_DRY_THRESHOLD_USD = parseFloat(process.env.VOL_DRY_THRESHOLD_USD || '2
 const VOL_DRY_CYCLES = parseInt(process.env.VOL_DRY_CYCLES || '3');
 const TVL_DILUTED_MIN_HOLD_MIN = parseFloat(process.env.TVL_DILUTED_MIN_HOLD_MIN || '45');
 const TVL_DILUTED_THRESHOLD_USD = parseFloat(process.env.TVL_DILUTED_THRESHOLD_USD || '60000');
+const TVL_LOW_WARN_USD = parseFloat(process.env.TVL_LOW_WARN_USD || '2000');
 const MONITOR_INTERVAL_SEC = parseInt(process.env.MONITOR_INTERVAL_SEC || '5');
 
 let cycleCount = 0;
 let monitorLoopActive = false; // flag agar hanya 1 monitor loop jalan
+let monitorLoopStarted = false; // flag strict — sekali start, tidak bisa start lagi sampai posisi clear
 let handleCloseInProgress = false; // guard agar handleClose tidak dipanggil 2x
+
+function stopMonitorLoop() {
+  monitorLoopActive = false;
+  monitorLoopStarted = false;
+}
 
 function loadState() {
   if (!fs.existsSync(STATE_FILE)) return { activePosition: null };
@@ -197,6 +204,26 @@ async function checkTvlDilution(state) {
 
   console.log(`  [TVL] Current: ${fmtUsd(currentTvl)} | Threshold: ${fmtUsd(TVL_DILUTED_THRESHOLD_USD)} | Hold: ${holdMin.toFixed(1)}min`);
 
+  // Warning jika TVL pool sudah sangat rendah
+  if (currentTvl < TVL_LOW_WARN_USD) {
+    const warnKey = `_tvlLowWarnSent_${pos_state.poolAddress}`;
+    if (!pos_state[warnKey]) {
+      pos_state[warnKey] = true;
+      console.log(`  [TVL] ⚠️ TVL sangat rendah! ${fmtUsd(currentTvl)} < ${fmtUsd(TVL_LOW_WARN_USD)}`);
+      await sendTelegram(
+        `⚠️ <b>TVL Pool Rendah!</b>\n` +
+        `Token: ${pos_state.symbol}\n` +
+        `TVL Pool: ${fmtUsd(currentTvl)} (di bawah $${TVL_LOW_WARN_USD.toLocaleString()})\n` +
+        `Hold: ${holdMin.toFixed(0)} menit\n` +
+        `PnL: ${fmtPct(pos_state._lastPnlPct ?? 0)}\n` +
+        `⚠️ Likuiditas mengering — pertimbangkan manual close`
+      );
+    }
+  } else {
+    // Reset flag kalau TVL naik lagi
+    delete pos_state[`_tvlLowWarnSent_${pos_state.poolAddress}`];
+  }
+
   if (currentTvl >= TVL_DILUTED_THRESHOLD_USD) {
     // Skip jika PnL masih minus — tunggu recovery dulu
     const currentPnlPct = pos_state._lastPnlPct ?? 0;
@@ -344,7 +371,7 @@ async function monitorTick() {
   if (data.error === 'position_not_found') {
     console.log('[MonitorTick] Position not found on-chain, clearing state.');
     saveState({ activePosition: null });
-    monitorLoopActive = false;
+    stopMonitorLoop();
     return;
   }
 
@@ -429,7 +456,7 @@ async function monitorTick() {
     const currentPriceTick = displayPrice || data.currentPrice;
     if (currentPriceTick > 0 && currentPriceTick < pos_state.supportLevelSol) {
       console.log(`[Action] SUPPORT BROKEN! Price ${fmtPrice(currentPriceTick)} < Support ${fmtPrice(pos_state.supportLevelSol)}`);
-      monitorLoopActive = false;
+      stopMonitorLoop();
       await handleClose(state, pos_state, 'SUPPORT_BROKEN', estPnlSol, estPnlPct, displayFeeSol);
       return;
     }
@@ -438,7 +465,7 @@ async function monitorTick() {
     // Emergency SL — tetap trigger meski ada support level
     if (estPnlPct <= -EMERGENCY_STOP_LOSS_PCT) {
       console.log(`[Action] EMERGENCY STOP LOSS -${EMERGENCY_STOP_LOSS_PCT}% triggered! PnL: ${fmtPct(estPnlPct)}`);
-      monitorLoopActive = false;
+      stopMonitorLoop();
       await handleClose(state, pos_state, 'STOP_LOSS', estPnlSol, estPnlPct, displayFeeSol);
       return;
     }
@@ -446,7 +473,7 @@ async function monitorTick() {
     // ── STOP LOSS fallback (hanya jika tidak ada support level)
     if (estPnlPct <= -STOP_LOSS_PCT) {
       console.log(`[Action] STOP LOSS -${STOP_LOSS_PCT}% triggered! (fallback — no support level data)`);
-      monitorLoopActive = false;
+      stopMonitorLoop();
       await handleClose(state, pos_state, 'STOP_LOSS', estPnlSol, estPnlPct, displayFeeSol);
       return;
     }
@@ -466,7 +493,7 @@ async function monitorTick() {
       if (elapsedMs >= PNL_STUCK_TIMEOUT_MS) {
         // Timeout habis dan PnL masih >= threshold → close sekarang selagi masih profit
         console.log(`[Action] PNL_STUCK! Timeout ${elapsedMin} menit — close selagi masih +${fmtPct(estPnlPct)}`);
-        monitorLoopActive = false;
+        stopMonitorLoop();
         await handleClose(state, pos_state, 'PNL_STUCK', estPnlSol, estPnlPct, displayFeeSol);
         return;
       }
@@ -482,7 +509,7 @@ async function monitorTick() {
   // ── TAKE PROFIT
   if (estPnlPct >= TAKE_PROFIT_PCT) {
     console.log('[Action] TAKE PROFIT triggered!');
-    monitorLoopActive = false;
+    stopMonitorLoop();
     await handleClose(state, pos_state, 'TAKE_PROFIT', estPnlSol, estPnlPct, displayFeeSol);
     return;
   }
@@ -501,7 +528,7 @@ async function monitorTick() {
       if (vol5m !== null && vol5m >= OOR_ABOVE_REOPEN_VOL_USD && reopenCount < OOR_ABOVE_MAX_REOPEN) {
         // Volume masih deres → close lalu re-open di range baru
         console.log(`[Action] OOR_ABOVE timeout TAPI volume masih ${fmtUsd(vol5m)} >= ${fmtUsd(OOR_ABOVE_REOPEN_VOL_USD)} → RE-OPEN (attempt ${reopenCount + 1}/${OOR_ABOVE_MAX_REOPEN})`);
-        monitorLoopActive = false;
+        stopMonitorLoop();
 
         await sendTelegram(
           `🔄 <b>OOR Above — Re-Open!</b>\n` +
@@ -528,15 +555,17 @@ async function monitorTick() {
         }
 
         // Tunggu settlement
-        await new Promise(r => setTimeout(r, 5000));
+        await new Promise(r => setTimeout(r, 15000));
 
         // Swap token sisa ke SOL dulu jika ada
         if (AUTO_SWAP && pos_state.mint) {
+          console.log(`[ReOpen] Tunggu token balance settle sebelum swap...`);
           const swapRes = await swapTokenToSol(pos_state.mint);
           if (swapRes) console.log(`[ReOpen] Swap token sisa → ${swapRes.outSol.toFixed(6)} SOL`);
+          else console.log(`[ReOpen] Swap skip (token balance 0 atau gagal)`);
+          // Tunggu SOL settlement setelah swap
+          await new Promise(r => setTimeout(r, 5000));
         }
-
-        await new Promise(r => setTimeout(r, 3000));
 
         // Re-open dengan token + pool yang sama
         const bestToken = {
@@ -600,7 +629,7 @@ async function monitorTick() {
         );
 
         // Pastikan loop lama benar-benar berhenti sebelum start loop baru
-        monitorLoopActive = false;
+        stopMonitorLoop();
         await new Promise(r => setTimeout(r, 2000));
         startMonitorLoop();
         return;
@@ -610,14 +639,14 @@ async function monitorTick() {
       } else {
         console.log(`[Action] OOR_ABOVE — volume sepi (${vol5m !== null ? fmtUsd(vol5m) : 'N/A'}), close total.`);
       }
-      monitorLoopActive = false;
+      stopMonitorLoop();
       await handleClose(state, pos_state, 'OOR_ABOVE', estPnlSol, estPnlPct, displayFeeSol);
       return;
     }
 
     // OOR_BELOW → langsung close
     console.log(`[Action] OOR BELOW limit reached (${outOfRangeMinutes.toFixed(1)}/${oorLimit}min), closing.`);
-    monitorLoopActive = false;
+    stopMonitorLoop();
     await handleClose(state, pos_state, 'OOR_BELOW', estPnlSol, estPnlPct, displayFeeSol);
     return;
   }
@@ -682,10 +711,10 @@ async function checkVolume(state) {
 
 // ─── MONITOR LOOP — jalan tiap MONITOR_INTERVAL_SEC selama ada posisi ────────
 async function startMonitorLoop() {
-  if (monitorLoopActive) {
-    console.log('[MonitorLoop] Already active, skip duplicate start.');
-    return;
+  if (monitorLoopStarted) {
+    return; // strict guard — tidak bisa start 2x
   }
+  monitorLoopStarted = true;
   monitorLoopActive = true;
   console.log(`[MonitorLoop] Started — interval ${MONITOR_INTERVAL_SEC}s`);
 
@@ -694,7 +723,7 @@ async function startMonitorLoop() {
     const state = loadState();
     if (!state.activePosition) {
       console.log('[MonitorLoop] No active position, stopping loop.');
-      monitorLoopActive = false;
+      stopMonitorLoop();
       return;
     }
     try {
@@ -736,7 +765,7 @@ async function runCycle() {
       const pnlSol = 0;
       const feeSol = pos_state._lastFeeSol ?? 0;
       console.log(`[Action] VOL_DRY triggered after ${VOL_DRY_CYCLES} cycles!`);
-      monitorLoopActive = false;
+      stopMonitorLoop();
       await handleClose(state, pos_state, 'VOL_DRY', pnlSol, pnlPct, feeSol);
       return;
     }
@@ -747,7 +776,7 @@ async function runCycle() {
       const pnlPct = pos_state._lastPnlPct ?? 0;
       const feeSol = pos_state._lastFeeSol ?? 0;
       console.log(`[Action] TVL_DILUTED triggered!`);
-      monitorLoopActive = false;
+      stopMonitorLoop();
       await handleClose(state, pos_state, 'TVL_DILUTED', 0, pnlPct, feeSol);
       return;
     }
@@ -974,7 +1003,7 @@ async function handleClose(state, pos_state, reason, pnlSol, pnlPct, totalFeeSol
       console.log('[Close] Posisi sudah tidak ada di chain, anggap sudah closed. Lanjut cleanup...');
       state.activePosition = null;
       saveState(state);
-      monitorLoopActive = false;
+      stopMonitorLoop();
       await sendTelegram(`⚠️ <b>Posisi sudah tidak ada di chain</b>\nToken: <b>${pos_state.symbol}</b>\nKemungkinan sudah closed sebelumnya. State dibersihkan.`);
       return;
     }
