@@ -1,0 +1,10 @@
+.env
+*.log
+node_modules/
+state.json
+trade_log.json
+known_pools.json
+blacklist.json
+agent.pid
+bot.pid
+*.bak.*
