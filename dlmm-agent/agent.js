@@ -461,16 +461,16 @@ async function monitorTick() {
       // Konfirmasi 1 menit — jangan close langsung kalau wick sesaat
       if (!pos_state._slConfirmAt) {
         pos_state._slConfirmAt = Date.now();
-        console.log(`[Action] SUPPORT BROKEN — mulai konfirmasi 1 menit (harga ${fmtPrice(currentPriceTick)} < support ${fmtPrice(pos_state.supportLevelSol)})`);
+        console.log(`[Action] SUPPORT BROKEN — mulai konfirmasi 3 menit (harga ${fmtPrice(currentPriceTick)} < support ${fmtPrice(pos_state.supportLevelSol)})`);
       } else {
         const confirmMin = (Date.now() - pos_state._slConfirmAt) / 60000;
-        if (confirmMin >= 1) {
+        if (confirmMin >= 3) {
           console.log(`[Action] SUPPORT BROKEN konfirmasi selesai ${confirmMin.toFixed(1)}min — close!`);
           stopMonitorLoop();
           await handleClose(state, pos_state, 'SUPPORT_BROKEN', estPnlSol, estPnlPct, displayFeeSol);
           return;
         } else {
-          console.log(`  [SL] SUPPORT BROKEN — konfirmasi ${confirmMin.toFixed(1)}/1.0 menit...`);
+          console.log(`  [SL] SUPPORT BROKEN — konfirmasi ${confirmMin.toFixed(1)}/3.0 menit...`);
         }
       }
     } else {
@@ -495,16 +495,16 @@ async function monitorTick() {
       // Konfirmasi 1 menit — jangan close langsung kalau wick sesaat
       if (!pos_state._slConfirmAt) {
         pos_state._slConfirmAt = Date.now();
-        console.log(`[Action] STOP LOSS ${fmtPct(estPnlPct)} — mulai konfirmasi 1 menit...`);
+        console.log(`[Action] STOP LOSS ${fmtPct(estPnlPct)} — mulai konfirmasi 3 menit...`);
       } else {
         const confirmMin = (Date.now() - pos_state._slConfirmAt) / 60000;
-        if (confirmMin >= 1) {
+        if (confirmMin >= 3) {
           console.log(`[Action] STOP LOSS konfirmasi selesai ${confirmMin.toFixed(1)}min — close!`);
           stopMonitorLoop();
           await handleClose(state, pos_state, 'STOP_LOSS', estPnlSol, estPnlPct, displayFeeSol);
           return;
         } else {
-          console.log(`  [SL] STOP LOSS ${fmtPct(estPnlPct)} — konfirmasi ${confirmMin.toFixed(1)}/1.0 menit...`);
+          console.log(`  [SL] STOP LOSS ${fmtPct(estPnlPct)} — konfirmasi ${confirmMin.toFixed(1)}/3.0 menit...`);
         }
       }
     } else {
