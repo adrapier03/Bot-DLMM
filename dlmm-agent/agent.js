@@ -382,7 +382,7 @@ async function monitorTick() {
 
   const { inRange, pnlSol, pnlPct, totalFeeSol, currentPrice, activeBinId } = data;
 
-  // Prioritaskan angka Meteora datapi
+  // On-chain PnL → dipakai untuk trigger TP/SL (paling akurat)
   let estPnlSol = pnlSol;
   let estPnlPct = pnlPct;
   let estPnlUsd = null;
@@ -396,19 +396,13 @@ async function monitorTick() {
   );
 
   if (mData) {
-    if (mData.pnlSol !== null) estPnlSol = mData.pnlSol;
-    if (mData.pnlPct !== null) estPnlPct = mData.pnlPct;
-    if (mData.pnlUsd !== null) estPnlUsd = mData.pnlUsd;
+    // Datapi hanya untuk display (fee, price, USD estimate) — JANGAN override PnL trigger
     if (mData.unclaimedFeesSol !== null) displayFeeSol = mData.unclaimedFeesSol;
     if (mData.poolPrice !== null) displayPrice = mData.poolPrice;
-
-    // Kurangi fee unrealized dari estPnlSol/estPnlPct
-    // → TP/SL trigger berdasarkan position value SAJA, bukan inflate fee
-    if (mData.unclaimedFeesSol !== null && mData.unclaimedFeesSol > 0) {
-      const budgetSol = pos_state.budgetSol || 1;
-      estPnlSol = estPnlSol - mData.unclaimedFeesSol;
-      estPnlPct = (estPnlSol / budgetSol) * 100;
-      console.log(`  [PnL] Fee excluded: gross=${fmtPct(mData.pnlPct)} fee=${fmtSol(mData.unclaimedFeesSol)} SOL → net=${fmtPct(estPnlPct)}`);
+    if (mData.pnlUsd !== null) estPnlUsd = mData.pnlUsd;
+    // Log perbedaan datapi vs on-chain untuk monitoring
+    if (mData.pnlPct !== null) {
+      console.log(`  [PnL] on-chain=${fmtPct(pnlPct)} | datapi=${fmtPct(mData.pnlPct)} | fee=${fmtSol(mData.unclaimedFeesSol ?? 0)} SOL`);
     }
   } else {
     try {
