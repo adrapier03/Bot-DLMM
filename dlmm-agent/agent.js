@@ -458,10 +458,27 @@ async function monitorTick() {
   if (pos_state.supportLevelSol && estPnlPct < 0) {
     const currentPriceTick = displayPrice || data.currentPrice;
     if (currentPriceTick > 0 && currentPriceTick < pos_state.supportLevelSol) {
-      console.log(`[Action] SUPPORT BROKEN! Price ${fmtPrice(currentPriceTick)} < Support ${fmtPrice(pos_state.supportLevelSol)}`);
-      stopMonitorLoop();
-      await handleClose(state, pos_state, 'SUPPORT_BROKEN', estPnlSol, estPnlPct, displayFeeSol);
-      return;
+      // Konfirmasi 1 menit — jangan close langsung kalau wick sesaat
+      if (!pos_state._slConfirmAt) {
+        pos_state._slConfirmAt = Date.now();
+        console.log(`[Action] SUPPORT BROKEN — mulai konfirmasi 1 menit (harga ${fmtPrice(currentPriceTick)} < support ${fmtPrice(pos_state.supportLevelSol)})`);
+      } else {
+        const confirmMin = (Date.now() - pos_state._slConfirmAt) / 60000;
+        if (confirmMin >= 1) {
+          console.log(`[Action] SUPPORT BROKEN konfirmasi selesai ${confirmMin.toFixed(1)}min — close!`);
+          stopMonitorLoop();
+          await handleClose(state, pos_state, 'SUPPORT_BROKEN', estPnlSol, estPnlPct, displayFeeSol);
+          return;
+        } else {
+          console.log(`  [SL] SUPPORT BROKEN — konfirmasi ${confirmMin.toFixed(1)}/1.0 menit...`);
+        }
+      }
+    } else {
+      // Harga recover di atas support → reset timer konfirmasi
+      if (pos_state._slConfirmAt) {
+        console.log(`  [SL] Harga recover di atas support — reset konfirmasi`);
+        pos_state._slConfirmAt = null;
+      }
     }
     // Support level ada → cek emergency SL dulu sebelum skip SL %
     console.log(`  [SL] Support level aktif (${fmtPrice(pos_state.supportLevelSol)}) — SL % dinonaktifkan`);
@@ -475,10 +492,27 @@ async function monitorTick() {
   } else {
     // ── STOP LOSS fallback (hanya jika tidak ada support level)
     if (estPnlPct <= -STOP_LOSS_PCT) {
-      console.log(`[Action] STOP LOSS -${STOP_LOSS_PCT}% triggered! (fallback — no support level data)`);
-      stopMonitorLoop();
-      await handleClose(state, pos_state, 'STOP_LOSS', estPnlSol, estPnlPct, displayFeeSol);
-      return;
+      // Konfirmasi 1 menit — jangan close langsung kalau wick sesaat
+      if (!pos_state._slConfirmAt) {
+        pos_state._slConfirmAt = Date.now();
+        console.log(`[Action] STOP LOSS ${fmtPct(estPnlPct)} — mulai konfirmasi 1 menit...`);
+      } else {
+        const confirmMin = (Date.now() - pos_state._slConfirmAt) / 60000;
+        if (confirmMin >= 1) {
+          console.log(`[Action] STOP LOSS konfirmasi selesai ${confirmMin.toFixed(1)}min — close!`);
+          stopMonitorLoop();
+          await handleClose(state, pos_state, 'STOP_LOSS', estPnlSol, estPnlPct, displayFeeSol);
+          return;
+        } else {
+          console.log(`  [SL] STOP LOSS ${fmtPct(estPnlPct)} — konfirmasi ${confirmMin.toFixed(1)}/1.0 menit...`);
+        }
+      }
+    } else {
+      // PnL recover di atas SL → reset timer konfirmasi
+      if (pos_state._slConfirmAt) {
+        console.log(`  [SL] PnL recover (${fmtPct(estPnlPct)}) — reset konfirmasi SL`);
+        pos_state._slConfirmAt = null;
+      }
     }
   }
 
