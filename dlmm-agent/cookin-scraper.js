@@ -221,6 +221,16 @@ export function passCookinFilter(data) {
     return { pass: false, reasons };
   }
 
+  // Reject jika semua metrik behavioral = 0 (data tidak valid / scrape partial)
+  const behavioralVals = [data.bundle, data.dirty, data.dumpers, data.alphaHands, data.inProfit, data.top10];
+  const nonNullVals = behavioralVals.filter(v => v !== null && v !== undefined);
+  const allZero = nonNullVals.length >= 4 && nonNullVals.every(v => v === 0);
+  if (allZero) {
+    reasons.push(`Semua metrik behavioral = 0 — data tidak valid (kemungkinan scrape partial)`);
+    console.log(`[Cookin] ❌ REJECT: Semua metrik 0, data tidak valid`);
+    return { pass: false, reasons };
+  }
+
   // Syarat utama: Harus maksimal 2 sinyal merah (bearish max 2)
   if (data.bearishCount > 2) {
     reasons.push(`Terlalu banyak bearish/merah (${data.bearishCount}/7)`);

@@ -401,6 +401,15 @@ async function monitorTick() {
     if (mData.pnlUsd !== null) estPnlUsd = mData.pnlUsd;
     if (mData.unclaimedFeesSol !== null) displayFeeSol = mData.unclaimedFeesSol;
     if (mData.poolPrice !== null) displayPrice = mData.poolPrice;
+
+    // Kurangi fee unrealized dari estPnlSol/estPnlPct
+    // → TP/SL trigger berdasarkan position value SAJA, bukan inflate fee
+    if (mData.unclaimedFeesSol !== null && mData.unclaimedFeesSol > 0) {
+      const budgetSol = pos_state.budgetSol || 1;
+      estPnlSol = estPnlSol - mData.unclaimedFeesSol;
+      estPnlPct = (estPnlSol / budgetSol) * 100;
+      console.log(`  [PnL] Fee excluded: gross=${fmtPct(mData.pnlPct)} fee=${fmtSol(mData.unclaimedFeesSol)} SOL → net=${fmtPct(estPnlPct)}`);
+    }
   } else {
     try {
       const solPriceUsd = await fetchJupiterPriceUsd('So11111111111111111111111111111111111111112');
