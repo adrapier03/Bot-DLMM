@@ -242,30 +242,6 @@ export async function scanTokens() {
 
     console.log(`  ✅ LOLOS semua filter — masuk kandidat!`);
 
-    // ── MC Downtrend check ──
-    // Kalau token ini sudah pernah di-trade sebelumnya,
-    // reject jika MC sekarang lebih rendah dari MC entry terakhir
-    try {
-      const TRADE_LOG_FILE = './trade_log.json';
-      if (fs.existsSync(TRADE_LOG_FILE)) {
-        const tradeLogs = JSON.parse(fs.readFileSync(TRADE_LOG_FILE, 'utf8'));
-        const prevOpens = tradeLogs.filter(l => l.action === 'OPEN' && l.mint === mint && l.mc);
-        if (prevOpens.length > 0) {
-          const lastOpen = prevOpens[prevOpens.length - 1];
-          const lastMc = lastOpen.mc;
-          if (mc < lastMc) {
-            console.log(`  ❌ REJECT: MC Downtrend — sekarang $${(mc/1000).toFixed(1)}K < entry terakhir $${(lastMc/1000).toFixed(1)}K`);
-            results.rejected.mc_downtrend = (results.rejected.mc_downtrend || 0) + 1;
-            continue;
-          } else {
-            console.log(`  [MCTrend] OK — MC sekarang $${(mc/1000).toFixed(1)}K >= entry terakhir $${(lastMc/1000).toFixed(1)}K`);
-          }
-        }
-      }
-    } catch (e) {
-      console.log(`  [MCTrend] Skip check (error: ${e.message})`);
-    }
-
     results.passed.push({ mint, symbol, mc, vol, pool, cookin });
   }
 

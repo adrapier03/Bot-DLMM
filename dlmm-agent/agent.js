@@ -586,6 +586,8 @@ async function monitorTick() {
               ...data,
               reopenCount: reopenCount + 1, // track jumlah re-open
               walletBalanceBeforeOpenSol: pos_state.walletBalanceBeforeOpenSol,
+              supportLevelSol: null,   // reset support — akan di-scrape ulang dari entry baru
+              supportLevelUsd: null,
             };
             saveState(s);
             addKnownPool(data.poolAddress);
