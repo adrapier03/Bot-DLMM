@@ -56,7 +56,7 @@ export async function openPosition(token) {
   let minBinId, maxBinId;
   if (!isSolX) {
     maxBinId = activeBin.binId;
-    minBinId = activeBin.binId - 80;
+    minBinId = activeBin.binId - 69;
   } else {
     minBinId = activeBin.binId;
     maxBinId = activeBin.binId + 69;
