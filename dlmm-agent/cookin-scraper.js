@@ -6,6 +6,8 @@ const COOKIE_VALUE = process.env.COOKIN_COOKIE || '';
 const COOKIE_VISITOR = process.env.COOKIN_VISITOR || '';
 const COOKIE_GA = process.env.COOKIN_GA || '';
 const COOKIN_URL = 'https://cookin.fun';
+const COOKIN_MAX_NUKE_PCT = parseFloat(process.env.COOKIN_MAX_NUKE_PCT || '5');
+const COOKIN_MAX_LARGE_PCT = parseFloat(process.env.COOKIN_MAX_LARGE_PCT || '11');
 
 let browser = null;
 let context = null;
@@ -103,6 +105,7 @@ function parseCookinData(text, mint) {
   const inProfit   = getPct('InProfit:');
   const bots       = getPct('Bots:');
   const nuke       = getPct('Nuke:');       // Sell Impact → Nuke
+  const large      = getPct('Large:');      // Sell Impact → Large
   const jeets      = getPct('Jeets:');
 
   // Top 10 holders %
@@ -189,7 +192,7 @@ function parseCookinData(text, mint) {
     mint,
     score, pumpMet, pumpTotal, dumpMet, dumpTotal,
     dumpers, dirty, bundle, alphaHands, inProfit,
-    bots, jeets, nuke, sellImpact,
+    bots, jeets, nuke, large, sellImpact,
     holdUnder1min, conviction, smartWallets,
     top3pct, top10pct,
     ratings, bullishCount, bearishCount, overallSignal,
@@ -231,14 +234,16 @@ export function passCookinFilter(data) {
     return { pass: false, reasons };
   }
 
+  // Hard reject Sell Impact sesuai request:
+  // jika Nuke > 5% DAN Large > 11% => jangan entry
+  if (data.nuke !== null && data.large !== null && data.nuke > COOKIN_MAX_NUKE_PCT && data.large > COOKIN_MAX_LARGE_PCT) {
+    reasons.push(`Sell Impact tinggi (Nuke ${data.nuke}% > ${COOKIN_MAX_NUKE_PCT}% & Large ${data.large}% > ${COOKIN_MAX_LARGE_PCT}%)`);
+  }
+
   // Syarat utama: Harus maksimal 2 sinyal merah (bearish max 2)
   if (data.bearishCount > 2) {
     reasons.push(`Terlalu banyak bearish/merah (${data.bearishCount}/7)`);
   }
-
-  // SEMUA HARD REJECT DISINI SUDAH DIMATIKAN SESUAI REQUEST
-  // Termasuk Bundle > 70%, Dumpers > 80%, dll 
-  // Sekarang murni ikut rule "minimal 3 merah baru reject"
 
   if (reasons.length > 0) {
     console.log(`[Cookin] ❌ REJECT: ${reasons.join(' | ')}`);
@@ -264,6 +269,7 @@ export function formatCookinSummary(data) {
     `${emoji[r.inProfit.rating]}InProfit: ${r.inProfit.val ?? 'N/A'}%  ` +
     `${emoji[r.top10.rating]}Top10: ${r.top10.val ?? 'N/A'}%\n` +
     `${emoji[r.sellImpact.rating]}SellImpact: ${r.sellImpact.val ?? 'N/A'}%  ` +
+    `Nuke: ${data.nuke ?? 'N/A'}%  Large: ${data.large ?? 'N/A'}%\n` +
     `Bots: ${data.bots ?? 'N/A'}%  Hold&lt;1m: ${data.holdUnder1min ?? 'N/A'}%`
   );
 }
