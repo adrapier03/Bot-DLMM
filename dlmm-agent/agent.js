@@ -1047,7 +1047,9 @@ async function runCycle() {
     `💰 Balance sebelum open: <b>${fmtSol(balanceSol)} SOL</b>\n` +
     `Layer 1 (70% BidAsk): <a href="https://solscan.io/tx/${posData.txHash}">TX1</a>\n` +
     (posData.txHash2 ? `Layer 2 (30% Spot): <a href="https://solscan.io/tx/${posData.txHash2}">TX2</a>` : `Layer 2: skipped`) +
-    (best.cookin ? `\n${formatCookinSummary(best.cookin)}` : '')
+    (best.cookin
+      ? `\n🧨 Sell Impact Detail: Nuke <b>${best.cookin.nuke ?? 'N/A'}%</b> | Large <b>${best.cookin.large ?? 'N/A'}%</b>\n${formatCookinSummary(best.cookin)}`
+      : '')
   );
 }
 
