@@ -39,6 +39,10 @@ const OOR_ABOVE_REOPEN_VOL_USD = parseFloat(process.env.OOR_ABOVE_REOPEN_VOL_USD
 const OOR_ABOVE_MAX_REOPEN = parseInt(process.env.OOR_ABOVE_MAX_REOPEN || '2'); // max re-open berturut
 const OOR_BELOW_LIMIT_MIN = parseFloat(process.env.OOR_BELOW_LIMIT_MIN || '20');
 const VOL_DRY_THRESHOLD_USD = parseFloat(process.env.VOL_DRY_THRESHOLD_USD || '20000');
+// Proteksi dump cepat saat PnL whipsaw
+const TRAILING_ARM_PCT = parseFloat(process.env.TRAILING_ARM_PCT || '0.8');      // aktifkan trailing kalau sempat profit >= ini
+const TRAILING_DROP_PCT = parseFloat(process.env.TRAILING_DROP_PCT || '2.5');    // close jika drop dari peak >= ini
+const PANIC_DROP_PCT_PER_TICK = parseFloat(process.env.PANIC_DROP_PCT_PER_TICK || '5'); // close jika jatuh seketika per tick
 const VOL_DRY_CYCLES = parseInt(process.env.VOL_DRY_CYCLES || '3');
 const TVL_DILUTED_MIN_HOLD_MIN = parseFloat(process.env.TVL_DILUTED_MIN_HOLD_MIN || '45');
 const TVL_DILUTED_THRESHOLD_USD = parseFloat(process.env.TVL_DILUTED_THRESHOLD_USD || '60000');
@@ -461,6 +465,35 @@ async function monitorTick() {
     return;
   }
 
+  // Track peak PnL untuk trailing protection
+  if (typeof pos_state._peakPnlPct !== 'number' || estPnlPct > pos_state._peakPnlPct) {
+    pos_state._peakPnlPct = estPnlPct;
+  }
+
+  // ── PANIC DUMP PER TICK (anti flash-dump)
+  // Contoh: dari +1% langsung -7% dalam 1-2 tick → close cepat, jangan tunggu konfirmasi 3 menit
+  if (typeof pos_state._prevPnlPct === 'number') {
+    const tickDrop = estPnlPct - pos_state._prevPnlPct;
+    if (tickDrop <= -PANIC_DROP_PCT_PER_TICK && estPnlPct < 0) {
+      console.log(`[Action] PANIC_DUMP triggered! Tick drop ${fmtPct(tickDrop)} (prev ${fmtPct(pos_state._prevPnlPct)} -> now ${fmtPct(estPnlPct)})`);
+      stopMonitorLoop();
+      await handleClose(state, pos_state, 'PANIC_DUMP', estPnlSol, estPnlPct, displayFeeSol);
+      return;
+    }
+  }
+
+  // ── TRAILING DRAWDOWN PROTECTION
+  // Setelah sempat hijau, kalau drawdown dari peak terlalu besar → close protektif
+  if (typeof pos_state._peakPnlPct === 'number' && pos_state._peakPnlPct >= TRAILING_ARM_PCT) {
+    const drawdown = pos_state._peakPnlPct - estPnlPct;
+    if (drawdown >= TRAILING_DROP_PCT) {
+      console.log(`[Action] TRAILING_PROTECT triggered! Peak ${fmtPct(pos_state._peakPnlPct)} -> now ${fmtPct(estPnlPct)} (DD ${fmtPct(drawdown)})`);
+      stopMonitorLoop();
+      await handleClose(state, pos_state, 'TRAILING_PROTECT', estPnlSol, estPnlPct, displayFeeSol);
+      return;
+    }
+  }
+
   // ── SUPPORT LEVEL BROKEN — jika support level tersedia, ini MENGGANTIKAN SL %
   if (pos_state.supportLevelSol && estPnlPct < 0) {
     const currentPriceTick = displayPrice || data.currentPrice;
@@ -708,6 +741,8 @@ async function monitorTick() {
   pos_state._lastOorDir = oorDir;
   pos_state._lastOorMin = outOfRangeMinutes;
   pos_state._lastOorLimit = oorLimit;
+  pos_state._prevPnlPct = estPnlPct;
+  pos_state._prevPnlAt = Date.now();
   saveState(state);
 }
 
@@ -1154,7 +1189,7 @@ async function handleClose(state, pos_state, reason, pnlSol, pnlPct, totalFeeSol
   state.activePosition = null;
   saveState(state);
 
-  const emoji = { TAKE_PROFIT: '🎉', STOP_LOSS: '🛑', OOR_ABOVE: '📈', OOR_BELOW: '📉', VOL_DRY: '🌵', TVL_DILUTED: '🏊', SUPPORT_BROKEN: '🔻', PNL_STUCK: '😐' }[reason] || '⚠️';
+  const emoji = { TAKE_PROFIT: '🎉', STOP_LOSS: '🛑', OOR_ABOVE: '📈', OOR_BELOW: '📉', VOL_DRY: '🌵', TVL_DILUTED: '🏊', SUPPORT_BROKEN: '🔻', PNL_STUCK: '😐', PANIC_DUMP: '🚨', TRAILING_PROTECT: '🛡️' }[reason] || '⚠️';
   const label = {
     TAKE_PROFIT: 'Take Profit',
     STOP_LOSS: 'Stop Loss',
@@ -1163,6 +1198,8 @@ async function handleClose(state, pos_state, reason, pnlSol, pnlPct, totalFeeSol
     VOL_DRY: 'Volume Sepi — keluar sebelum terlambat',
     TVL_DILUTED: 'TVL Terlalu Besar — fee makin encer, cabut!',
     SUPPORT_BROKEN: 'Support Level Jebol — top holders avg buy ditembus!',
+    PANIC_DUMP: 'Panic Dump Terdeteksi — close cepat',
+    TRAILING_PROTECT: 'Trailing Protect — drawdown dari peak terlalu dalam',
   }[reason] || reason;
 
   // Build token breakdown line
