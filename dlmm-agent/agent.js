@@ -396,19 +396,26 @@ async function monitorTick() {
   );
 
   if (mData) {
-    // Datapi hanya untuk display (fee, price, USD estimate) — JANGAN override PnL trigger
+    // Datapi hanya untuk fee/price display — PnL USD dihitung dari on-chain pnlSol agar konsisten tanda & persen
     if (mData.unclaimedFeesSol !== null) displayFeeSol = mData.unclaimedFeesSol;
     if (mData.poolPrice !== null) displayPrice = mData.poolPrice;
-    if (mData.pnlUsd !== null) estPnlUsd = mData.pnlUsd;
     // Log perbedaan datapi vs on-chain untuk monitoring
     if (mData.pnlPct !== null) {
       console.log(`  [PnL] on-chain=${fmtPct(pnlPct)} | datapi=${fmtPct(mData.pnlPct)} | fee=${fmtSol(mData.unclaimedFeesSol ?? 0)} SOL`);
     }
-  } else {
-    try {
-      const solPriceUsd = await fetchJupiterPriceUsd('So11111111111111111111111111111111111111112');
-      if (solPriceUsd && solPriceUsd > 0) estPnlUsd = estPnlSol * solPriceUsd;
-    } catch {}
+  }
+
+  // PnL USD selalu derive dari on-chain pnlSol agar tidak mismatch (+% tapi -$)
+  try {
+    const solPriceUsd = await fetchJupiterPriceUsd('So11111111111111111111111111111111111111112');
+    if (solPriceUsd && solPriceUsd > 0) {
+      estPnlUsd = estPnlSol * solPriceUsd;
+    } else if (mData?.pnlUsd !== null && mData?.pnlUsd !== undefined) {
+      // fallback jika jup price fail
+      estPnlUsd = mData.pnlUsd;
+    }
+  } catch {
+    if (mData?.pnlUsd !== null && mData?.pnlUsd !== undefined) estPnlUsd = mData.pnlUsd;
   }
 
   const oorDir = getOORDirection(activeBinId, pos_state.minBinId, pos_state.maxBinId);
