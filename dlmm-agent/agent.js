@@ -495,13 +495,15 @@ async function monitorTick() {
     }
   }
 
-  // Track apakah posisi sempat minus
-  if (estPnlPct < 0) pos_state._seenNegativePnl = true;
+  // Track drawdown terdalam posisi
+  if (typeof pos_state._minPnlPct !== 'number' || estPnlPct < pos_state._minPnlPct) {
+    pos_state._minPnlPct = estPnlPct;
+  }
 
   // ── RECOVERY EXIT
-  // Jika posisi sempat minus lalu berhasil recover ke profit kecil, langsung amankan.
-  if (pos_state._seenNegativePnl && estPnlPct >= RECOVERY_CLOSE_PCT) {
-    console.log(`[Action] RECOVERY_EXIT triggered! Sempat minus lalu recover ke ${fmtPct(estPnlPct)} (threshold +${RECOVERY_CLOSE_PCT}%)`);
+  // Aktif hanya jika drawdown sempat <= -4%, lalu recover ke profit kecil.
+  if (pos_state._minPnlPct <= -4 && estPnlPct >= RECOVERY_CLOSE_PCT) {
+    console.log(`[Action] RECOVERY_EXIT triggered! Drawdown min ${fmtPct(pos_state._minPnlPct)} -> recover ${fmtPct(estPnlPct)} (target +${RECOVERY_CLOSE_PCT}%)`);
     stopMonitorLoop();
     await handleClose(state, pos_state, 'RECOVERY_EXIT', estPnlSol, estPnlPct, displayFeeSol);
     return;
