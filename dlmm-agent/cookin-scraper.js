@@ -269,7 +269,7 @@ export function formatCookinSummary(data) {
     `${emoji[r.inProfit.rating]}InProfit: ${r.inProfit.val ?? 'N/A'}%  ` +
     `${emoji[r.top10.rating]}Top10: ${r.top10.val ?? 'N/A'}%\n` +
     `${emoji[r.sellImpact.rating]}SellImpact: ${r.sellImpact.val ?? 'N/A'}%  ` +
-    `Nuke: ${data.nuke ?? 'N/A'}%  Large: ${data.large ?? 'N/A'}%\n` +
+    `Nuke: ${data.nuke ?? 'N/A'}%  Large: ${data.large ?? 'N/A'}%  ` +
     `Bots: ${data.bots ?? 'N/A'}%  Hold&lt;1m: ${data.holdUnder1min ?? 'N/A'}%`
   );
 }
