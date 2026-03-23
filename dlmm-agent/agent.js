@@ -43,6 +43,7 @@ const VOL_DRY_THRESHOLD_USD = parseFloat(process.env.VOL_DRY_THRESHOLD_USD || '2
 const TRAILING_ARM_PCT = parseFloat(process.env.TRAILING_ARM_PCT || '0.8');      // aktifkan trailing kalau sempat profit >= ini
 const TRAILING_DROP_PCT = parseFloat(process.env.TRAILING_DROP_PCT || '2.5');    // close jika drop dari peak >= ini
 const PANIC_DROP_PCT_PER_TICK = parseFloat(process.env.PANIC_DROP_PCT_PER_TICK || '5'); // close jika jatuh seketika per tick
+const RECOVERY_CLOSE_PCT = parseFloat(process.env.RECOVERY_CLOSE_PCT || '0.25'); // jika sempat minus lalu recover ke +x%, langsung close protektif
 const VOL_DRY_CYCLES = parseInt(process.env.VOL_DRY_CYCLES || '3');
 const TVL_DILUTED_MIN_HOLD_MIN = parseFloat(process.env.TVL_DILUTED_MIN_HOLD_MIN || '45');
 const TVL_DILUTED_THRESHOLD_USD = parseFloat(process.env.TVL_DILUTED_THRESHOLD_USD || '60000');
@@ -492,6 +493,18 @@ async function monitorTick() {
       await handleClose(state, pos_state, 'TRAILING_PROTECT', estPnlSol, estPnlPct, displayFeeSol);
       return;
     }
+  }
+
+  // Track apakah posisi sempat minus
+  if (estPnlPct < 0) pos_state._seenNegativePnl = true;
+
+  // ── RECOVERY EXIT
+  // Jika posisi sempat minus lalu berhasil recover ke profit kecil, langsung amankan.
+  if (pos_state._seenNegativePnl && estPnlPct >= RECOVERY_CLOSE_PCT) {
+    console.log(`[Action] RECOVERY_EXIT triggered! Sempat minus lalu recover ke ${fmtPct(estPnlPct)} (threshold +${RECOVERY_CLOSE_PCT}%)`);
+    stopMonitorLoop();
+    await handleClose(state, pos_state, 'RECOVERY_EXIT', estPnlSol, estPnlPct, displayFeeSol);
+    return;
   }
 
   // ── SUPPORT LEVEL BROKEN — jika support level tersedia, ini MENGGANTIKAN SL %
@@ -1189,7 +1202,7 @@ async function handleClose(state, pos_state, reason, pnlSol, pnlPct, totalFeeSol
   state.activePosition = null;
   saveState(state);
 
-  const emoji = { TAKE_PROFIT: '🎉', STOP_LOSS: '🛑', OOR_ABOVE: '📈', OOR_BELOW: '📉', VOL_DRY: '🌵', TVL_DILUTED: '🏊', SUPPORT_BROKEN: '🔻', PNL_STUCK: '😐', PANIC_DUMP: '🚨', TRAILING_PROTECT: '🛡️' }[reason] || '⚠️';
+  const emoji = { TAKE_PROFIT: '🎉', STOP_LOSS: '🛑', OOR_ABOVE: '📈', OOR_BELOW: '📉', VOL_DRY: '🌵', TVL_DILUTED: '🏊', SUPPORT_BROKEN: '🔻', PNL_STUCK: '😐', PANIC_DUMP: '🚨', TRAILING_PROTECT: '🛡️', RECOVERY_EXIT: '⚡' }[reason] || '⚠️';
   const label = {
     TAKE_PROFIT: 'Take Profit',
     STOP_LOSS: 'Stop Loss',
@@ -1200,6 +1213,7 @@ async function handleClose(state, pos_state, reason, pnlSol, pnlPct, totalFeeSol
     SUPPORT_BROKEN: 'Support Level Jebol — top holders avg buy ditembus!',
     PANIC_DUMP: 'Panic Dump Terdeteksi — close cepat',
     TRAILING_PROTECT: 'Trailing Protect — drawdown dari peak terlalu dalam',
+    RECOVERY_EXIT: 'Recovery Exit — sempat minus lalu profit, amankan cepat',
   }[reason] || reason;
 
   // Build token breakdown line
