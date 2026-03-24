@@ -235,9 +235,9 @@ export function passCookinFilter(data) {
   }
 
   // Hard reject Sell Impact sesuai request:
-  // jika Nuke > 5% DAN Large > 11% => jangan entry
-  if (data.nuke !== null && data.large !== null && data.nuke > COOKIN_MAX_NUKE_PCT && data.large > COOKIN_MAX_LARGE_PCT) {
-    reasons.push(`Sell Impact tinggi (Nuke ${data.nuke}% > ${COOKIN_MAX_NUKE_PCT}% & Large ${data.large}% > ${COOKIN_MAX_LARGE_PCT}%)`);
+  // Hard reject jika Nuke melebihi threshold
+  if (data.nuke !== null && data.nuke > COOKIN_MAX_NUKE_PCT) {
+    reasons.push(`Nuke terlalu tinggi (${data.nuke}% > ${COOKIN_MAX_NUKE_PCT}%)`);
   }
 
   // Syarat utama: Harus maksimal 2 sinyal merah (bearish max 2)
