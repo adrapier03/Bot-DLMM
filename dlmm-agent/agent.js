@@ -695,7 +695,26 @@ async function monitorTick() {
           newPosData = await openPosition(bestToken);
         } catch (e) {
           console.error('[ReOpen] Open error:', e.message);
-          await sendTelegram(`❌ <b>Gagal re-open posisi!</b>\nToken: ${pos_state.symbol}\nError: ${e.message}\nBot kembali ke scan mode.`);
+
+          // Penting: jangan langsung clear state.
+          // Bisa jadi ada monitorTick paralel yang sudah berhasil re-open posisi baru.
+          const latest = loadState();
+          const latestKey = latest.activePosition?.positionKey;
+          const thisFlowKey = pos_state?.positionKey;
+
+          await sendTelegram(
+            `❌ <b>Gagal re-open posisi!</b>\n` +
+            `Token: ${pos_state.symbol}\n` +
+            `Error: ${e.message}\n` +
+            `Posisi aktif dipertahankan jika masih ada.`
+          );
+
+          if (latest.activePosition && latestKey && thisFlowKey && latestKey !== thisFlowKey) {
+            console.log(`[ReOpen] Detected newer active position (${latestKey.slice(0, 8)}...), skip clear state.`);
+            return;
+          }
+
+          // Jika memang tidak ada posisi aktif valid, baru clear.
           state.activePosition = null;
           saveState(state);
           return;
