@@ -333,34 +333,37 @@ async function checkOrphanPositions(state) {
   if (orphans.length === 0) return;
 
   console.log(`[Orphan] Found ${orphans.length} untracked position(s)!`);
-  for (const o of orphans) {
-    console.log(`  Pool: ${o.poolAddress} | Pos: ${o.positionKey}`);
-    await sendTelegram(
-      `⚠️ <b>Orphan Position Detected!</b>\n` +
-      `Pool: <code>${o.poolAddress.slice(0, 20)}...</code>\n` +
-      `Position: <code>${o.positionKey.slice(0, 20)}...</code>\n` +
-      `X: ${o.totalX} | Y: ${o.totalY}\n` +
-      `Closing automatically...`
-    );
 
-    // Close orphan position
-    try {
-      const fakeState = {
-        positionKey: o.positionKey,
-        poolAddress: o.poolAddress,
-        minBinId: o.lowerBinId,
-        maxBinId: o.upperBinId,
-        mint: null,
-        symbol: 'ORPHAN',
-        budgetSol: BUDGET_SOL,
-        openedAt: Date.now(),
-      };
-      await closePosition(fakeState);
-      await sendTelegram(`✅ Orphan position closed successfully.`);
-    } catch (e) {
-      await sendTelegram(`❌ Failed to close orphan: ${e.message}`);
-    }
-  }
+  // Jangan auto-close langsung.
+  // Adopt orphan pertama ke state agar kembali dimonitor dulu (cek PnL/SL/OOR normal).
+  const o = orphans[0];
+  console.log(`  Pool: ${o.poolAddress} | Pos: ${o.positionKey}`);
+
+  state.activePosition = {
+    positionKey: o.positionKey,
+    poolAddress: o.poolAddress,
+    mint: o.mint || null,
+    symbol: 'ORPHAN',
+    entryPrice: null,
+    entryBin: o.upperBinId,
+    minBinId: o.lowerBinId,
+    maxBinId: o.upperBinId,
+    isSolX: !!o.isSolX,
+    budgetSol: BUDGET_SOL,
+    openedAt: Date.now(),
+    outOfRangeSince: null,
+    oorDirection: null,
+    _adoptedOrphan: true,
+  };
+  saveState(state);
+
+  await sendTelegram(
+    `⚠️ <b>Orphan Position Detected!</b>\n` +
+    `Pool: <code>${o.poolAddress.slice(0, 20)}...</code>\n` +
+    `Position: <code>${o.positionKey.slice(0, 20)}...</code>\n` +
+    `X: ${o.totalX} | Y: ${o.totalY}\n` +
+    `✅ Posisi di-adopt ke monitor dulu (tidak auto-close).`
+  );
 }
 
 // ─── MONITOR TICK (dipanggil tiap MONITOR_INTERVAL_SEC) ─────────────────────

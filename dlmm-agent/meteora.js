@@ -215,6 +215,11 @@ export async function scanOrphanPositions(knownPools = []) {
     try {
       const dlmm = await DLMM.create(getConnection(), new PublicKey(poolAddr));
       const { userPositions } = await dlmm.getPositionsByUserAndLbPair(wallet.publicKey);
+      const tokenXMint = dlmm.tokenX?.publicKey?.toBase58?.() || null;
+      const tokenYMint = dlmm.tokenY?.publicKey?.toBase58?.() || null;
+      const isSolXPool = tokenXMint === SOL_MINT;
+      const nonSolMint = isSolXPool ? tokenYMint : tokenXMint;
+
       for (const p of userPositions) {
         orphans.push({
           positionKey: p.publicKey.toBase58(),
@@ -223,6 +228,10 @@ export async function scanOrphanPositions(knownPools = []) {
           upperBinId: p.positionData.upperBinId,
           totalX: p.positionData.totalXAmount.toString(),
           totalY: p.positionData.totalYAmount.toString(),
+          tokenXMint,
+          tokenYMint,
+          isSolX: isSolXPool,
+          mint: nonSolMint,
         });
       }
     } catch {}
