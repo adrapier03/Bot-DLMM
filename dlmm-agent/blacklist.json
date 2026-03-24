@@ -2,14 +2,16 @@
   "mints": [
     "9QSjVAg5rDfBZPhvKwZcB63St3r6bqohP3Adurkjpump",
     "6Bp9LWtyVXcEATi5nuquX5p1hPGUg1cVoUuXGN9Epump",
-    "3WqRawDvt1ruonFZyvREptib1jHZskae4nMKJz8zpump"
+    "3WqRawDvt1ruonFZyvREptib1jHZskae4nMKJz8zpump",
+    "De1YMuyjsJ75n4kQxrEV587x4d4hiC2Vfn9He88gpump"
   ],
   "symbols": [
     "LAND"
   ],
   "notes": {
-    "9QSjVAg5rDfBZPhvKwZcB63St3r6bqohP3Adurkjpump": "Rosie \u2014 blacklisted manual, sering SL",
-    "6Bp9LWtyVXcEATi5nuquX5p1hPGUg1cVoUuXGN9Epump": "AIFRUITS \u2014 blacklisted manual 2026-03-23",
-    "3WqRawDvt1ruonFZyvREptib1jHZskae4nMKJz8zpump": "blacklisted manual by Rafi 2026-03-23"
+    "9QSjVAg5rDfBZPhvKwZcB63St3r6bqohP3Adurkjpump": "Rosie — blacklisted manual, sering SL",
+    "6Bp9LWtyVXcEATi5nuquX5p1hPGUg1cVoUuXGN9Epump": "AIFRUITS — blacklisted manual 2026-03-23",
+    "3WqRawDvt1ruonFZyvREptib1jHZskae4nMKJz8zpump": "blacklisted manual by Rafi 2026-03-23",
+    "De1YMuyjsJ75n4kQxrEV587x4d4hiC2Vfn9He88gpump": "LAND — blacklisted manual by Rafi 2026-03-24"
   }
 }
