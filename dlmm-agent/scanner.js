@@ -36,6 +36,7 @@ const MIN_TVL_USD = parseFloat(process.env.MIN_TVL_USD || '10000');
 const MAX_PRICE_CHANGE_5M = parseFloat(process.env.MAX_PRICE_CHANGE_5M || '15');
 const MAX_PRICE_CHANGE_1H = parseFloat(process.env.MAX_PRICE_CHANGE_1H || '50');
 const MAX_MC_USD = parseFloat(process.env.MAX_MC_USD || '2000000'); // reject jika MC >= 2M
+const MAX_BASE_FEE_PCT = parseFloat(process.env.MAX_BASE_FEE_PCT || '5'); // reject jika base fee >= 5%
 
 // Cache pairs — fetch ulang tiap 30 menit
 let pairsCache = null;
@@ -209,10 +210,12 @@ export async function scanTokens() {
       fees24h: best.fees ? parseFloat(best.fees["24h"] || 0) : 0,
       mintX: best.token_x.address,
       mintY: best.token_y.address,
+      baseFeePct: parseFloat(best.pool_config?.base_fee_pct || 0),
     };
 
     console.log(`  Pool    : ${pool.address}`);
     console.log(`  Liq     : ${fmtUsd(pool.liquidity)} | APR: ${pool.apr.toFixed(1)}% | Fee24h: ${fmtUsd(pool.fees24h)}`);
+    console.log(`  BaseFee : ${pool.baseFeePct.toFixed(2)}% (max < ${MAX_BASE_FEE_PCT.toFixed(2)}%)`);
 
     // ── CEK BIN ARRAYS — pool baru akan kena non-refundable rent ~0.07 SOL ──
     try {
@@ -262,6 +265,14 @@ export async function scanTokens() {
       continue;
     }
 
+    // Filter base fee — reject jika base fee pool terlalu tinggi
+    if (pool.baseFeePct >= MAX_BASE_FEE_PCT) {
+      console.log(`  ❌ REJECT: Base fee terlalu tinggi (${pool.baseFeePct.toFixed(2)}% >= ${MAX_BASE_FEE_PCT.toFixed(2)}%)`);
+      results.rejected.base_fee_high = (results.rejected.base_fee_high || 0) + 1;
+      pushRejectedDetail(symbol, mint, `Base fee terlalu tinggi (${pool.baseFeePct.toFixed(2)}% ≥ ${MAX_BASE_FEE_PCT.toFixed(2)}%)`);
+      continue;
+    }
+
     console.log(`  ✅ LOLOS filter GMGN+Meteora — cek Cookin.fun...`);
 
     // ── Cookin.fun behavioral filter ──
@@ -291,7 +302,7 @@ export async function scanTokens() {
   }
 
   console.log(`\n${separator}`);
-  console.log(`[Scanner] Hasil: ${results.scanned} scanned | ${results.passed.length} lolos | rejected: MC=${results.rejected.mc_too_large||0} LowTVL=${results.rejected.low_tvl||0} HighTVL=${results.rejected.high_liquidity||0} NoPool=${results.rejected.no_pool||0} Cookin=${results.rejected.cookin_reject||0} NewPool=${results.rejected.new_pool||0} Blacklist=${results.rejected.blacklisted||0} MCDowntrend=${results.rejected.mc_downtrend||0}`);
+  console.log(`[Scanner] Hasil: ${results.scanned} scanned | ${results.passed.length} lolos | rejected: MC=${results.rejected.mc_too_large||0} LowTVL=${results.rejected.low_tvl||0} HighTVL=${results.rejected.high_liquidity||0} BaseFee=${results.rejected.base_fee_high||0} NoPool=${results.rejected.no_pool||0} Cookin=${results.rejected.cookin_reject||0} NewPool=${results.rejected.new_pool||0} Blacklist=${results.rejected.blacklisted||0} MCDowntrend=${results.rejected.mc_downtrend||0}`);
   console.log(separator);
 
   return results;

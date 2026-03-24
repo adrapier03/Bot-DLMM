@@ -980,6 +980,7 @@ async function runCycle() {
       `• Pool baru (non-refundable): ${rejected.new_pool || 0}\n` +
       `• TVL terlalu besar: ${rejected.high_liquidity || 0}\n` +
       `• TVL terlalu kecil: ${rejected.low_tvl || 0}\n` +
+      `• Base fee terlalu tinggi: ${rejected.base_fee_high || 0}\n` +
       `• Cookin reject: ${rejected.cookin_reject || 0}\n` +
       `• Blacklist: ${rejected.blacklisted || 0}\n` +
       `• Meteora API error: ${rejected.meteora_api || 0}\n` +
