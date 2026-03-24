@@ -57,6 +57,7 @@ export async function scanTokens() {
     passed: [],
     rejected: { not_meteora: 0, no_pool: 0, cookin_reject: 0 },
     cookinRejectDetails: [], // Menyimpan detail reject cookin
+    rejectedDetails: [], // Menyimpan detail alasan reject per token
   };
 
   if (!fs.existsSync(GMGN_JSON_PATH)) {
@@ -77,16 +78,9 @@ export async function scanTokens() {
     console.log('[Scanner] No tokens in JSON (rank is null or empty)');
     return results;
   }
-  results.scanned = tokens.length;
-
   // Fetch/load pairs cache sekali untuk semua token di cycle ini
   let allPairs;
-  try {
-    allPairs = await getAllPairs();
-  } catch (e) {
-    console.error('[Scanner] Failed to fetch pairs:', e.message);
-    return results;
-  }
+  // getAllPairs replaced with dynamic datapi token fetch
 
   const fmtUsd = (n) => {
     if (!n || isNaN(n)) return '$0';
@@ -94,12 +88,17 @@ export async function scanTokens() {
     if (n >= 1e3) return `$${(n/1e3).toFixed(1)}K`;
     return `$${n.toFixed(0)}`;
   };
+  const pushRejectedDetail = (symbol, mint, reason) => {
+    const mintShort = mint ? `${mint.slice(0, 6)}...` : 'N/A';
+    results.rejectedDetails.push(`${symbol} (${mintShort}) — ${reason}`);
+  };
 
   const separator = '─'.repeat(55);
   let idx = 0;
 
   for (const token of tokens) {
     idx++;
+    results.scanned++;
     const mint = token.address || token.mint || token.token_address;
     const symbol = token.symbol || token.name || mint?.slice(0, 8);
     results.scannedTokens.push(`${symbol}${mint ? ` (${mint.slice(0, 6)}...)` : ''}`);
@@ -117,13 +116,18 @@ export async function scanTokens() {
     console.log(`  Δ5m     : ${priceChange5m >= 0 ? '+' : ''}${priceChange5m.toFixed(2)}% (max: ±${MAX_PRICE_CHANGE_5M}%)`);
     console.log(`  Δ1h     : ${priceChange1h >= 0 ? '+' : ''}${priceChange1h.toFixed(2)}% (max: ±${MAX_PRICE_CHANGE_1H}%)`);
 
-    if (!mint) { console.log(`  ❌ REJECT: mint address tidak ada`); continue; }
+    if (!mint) {
+      console.log(`  ❌ REJECT: mint address tidak ada`);
+      pushRejectedDetail(symbol, mint, 'mint address tidak ada');
+      continue;
+    }
 
     // Filter blacklist — reject token yang di-blacklist manual
     const blacklist = loadBlacklist();
     if (blacklist.has(mint)) {
       console.log(`  ❌ REJECT: Token di-blacklist (${symbol})`);
       results.rejected.blacklisted = (results.rejected.blacklisted || 0) + 1;
+      pushRejectedDetail(symbol, mint, 'token di-blacklist');
       continue;
     }
 
@@ -131,6 +135,7 @@ export async function scanTokens() {
     if (mc >= MAX_MC_USD) {
       console.log(`  ❌ REJECT: MC terlalu besar (${fmtUsd(mc)} >= ${fmtUsd(MAX_MC_USD)})`);
       results.rejected.mc_too_large = (results.rejected.mc_too_large || 0) + 1;
+      pushRejectedDetail(symbol, mint, `MC terlalu besar (${fmtUsd(mc)} ≥ ${fmtUsd(MAX_MC_USD)})`);
       continue;
     }
 
@@ -149,27 +154,52 @@ export async function scanTokens() {
     // }
 
     // Cari pool Meteora
-    const matched = allPairs.filter(p =>
-      (p.mint_x === mint || p.mint_y === mint) &&
-      (p.mint_x === SOL || p.mint_y === SOL)
-    );
+    // ==========================================
+    // NEW METEORA DATAPI FETCH BY TOKEN
+    // ==========================================
+    let matched = [];
+    try {
+      // NOTE: endpoint /pools tidak support query ?token=... untuk filter mint.
+      // Gunakan filter_by resmi dari docs agar hasil benar-benar by token pair.
+      const filterBy = `token_x=[${mint}|${SOL}] && token_y=[${mint}|${SOL}]`;
+      const meteoraRes = await axios.get('https://dlmm.datapi.meteora.ag/pools', {
+        params: {
+          filter_by: filterBy,
+          sort_by: 'tvl:desc',
+          page_size: 100,
+        },
+        timeout: 15000,
+      });
+
+      if (meteoraRes.data && Array.isArray(meteoraRes.data.data)) {
+        matched = meteoraRes.data.data;
+      }
+    } catch (e) {
+      console.log(`  ❌ REJECT: Gagal cek Meteora API (${e.message})`);
+      results.rejected.meteora_api = (results.rejected.meteora_api || 0) + 1;
+      pushRejectedDetail(symbol, mint, `gagal cek Meteora API (${e.message})`);
+      continue;
+    }
 
     if (matched.length === 0) {
       console.log(`  ❌ REJECT: Tidak ada pool SOL di Meteora DLMM`);
       results.rejected.no_pool++;
+      pushRejectedDetail(symbol, mint, 'tidak ada pool SOL di Meteora DLMM');
       continue;
     }
 
-    matched.sort((a, b) => parseFloat(b.liquidity || 0) - parseFloat(a.liquidity || 0));
+    // Cari pool dengan TVL (liquidity) paling besar
+    matched.sort((a, b) => parseFloat(b.tvl || 0) - parseFloat(a.tvl || 0));
     const best = matched[0];
 
+    // Mapping ulang ke format pool scanner lama
     const pool = {
       address: best.address,
-      liquidity: parseFloat(best.liquidity || 0),
+      liquidity: parseFloat(best.tvl || 0),
       apr: parseFloat(best.apr || 0),
-      fees24h: parseFloat(best.fees_24h || 0),
-      mintX: best.mint_x,
-      mintY: best.mint_y,
+      fees24h: best.fees ? parseFloat(best.fees["24h"] || 0) : 0,
+      mintX: best.token_x.address,
+      mintY: best.token_y.address,
     };
 
     console.log(`  Pool    : ${pool.address}`);
@@ -199,6 +229,7 @@ export async function scanTokens() {
       if (missingCount > 0) {
         console.log(`  ❌ REJECT: Pool baru — ${missingCount} bin array belum ada di chain → non-refundable ~0.07 SOL`);
         results.rejected.new_pool = (results.rejected.new_pool || 0) + 1;
+        pushRejectedDetail(symbol, mint, `pool baru (${missingCount} bin array belum ada)`);
         continue;
       }
       console.log(`  ✅ Bin arrays sudah exist (${binArrayKeys.length} arrays) — tidak kena non-refundable`);
@@ -210,6 +241,7 @@ export async function scanTokens() {
     if (pool.liquidity < MIN_TVL_USD) {
       console.log(`  ❌ REJECT: TVL terlalu kecil (${fmtUsd(pool.liquidity)} < ${fmtUsd(MIN_TVL_USD)})`);
       results.rejected.low_tvl = (results.rejected.low_tvl || 0) + 1;
+      pushRejectedDetail(symbol, mint, `TVL terlalu kecil (${fmtUsd(pool.liquidity)} ≤ ${fmtUsd(MIN_TVL_USD)})`);
       continue;
     }
 
@@ -217,6 +249,7 @@ export async function scanTokens() {
     if (pool.liquidity >= MIN_POOL_LIQUIDITY) {
       console.log(`  ❌ REJECT: TVL terlalu besar (${fmtUsd(pool.liquidity)} >= ${fmtUsd(MIN_POOL_LIQUIDITY)})`);
       results.rejected.high_liquidity = (results.rejected.high_liquidity || 0) + 1;
+      pushRejectedDetail(symbol, mint, `TVL terlalu besar (${fmtUsd(pool.liquidity)} ≥ ${fmtUsd(MIN_POOL_LIQUIDITY)})`);
       continue;
     }
 
@@ -230,13 +263,16 @@ export async function scanTokens() {
       const check = passCookinFilter(cookin);
       if (check.pass === false) {
         results.rejected.cookin_reject = (results.rejected.cookin_reject || 0) + 1;
-        results.cookinRejectDetails.push(`${symbol}: ${check.reasons.join(' | ')}`);
+        const reason = check.reasons.join(' | ');
+        results.cookinRejectDetails.push(`${symbol}: ${reason}`);
+        pushRejectedDetail(symbol, mint, `Cookin reject (${reason})`);
         continue;
       }
     } else {
       console.log(`  ❌ REJECT: Cookin.fun tidak ada data (token belum ter-index atau scrape gagal)`);
       results.rejected.cookin_reject = (results.rejected.cookin_reject || 0) + 1;
       results.cookinRejectDetails.push(`${symbol}: No Cookin data (N/A)`);
+      pushRejectedDetail(symbol, mint, 'Cookin data tidak tersedia (N/A)');
       continue;
     }
 

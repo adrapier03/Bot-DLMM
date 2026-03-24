@@ -136,6 +136,12 @@ async function calcSupportLevel(mint, symbol) {
 function fmtSol(n) { return typeof n === 'number' ? n.toFixed(4) : '0.0000'; }
 function fmtPct(n) { return (n >= 0 ? '+' : '') + n.toFixed(2) + '%'; }
 function fmtUsd(n) { return '$' + (n || 0).toLocaleString('en-US', { maximumFractionDigits: 0 }); }
+function escapeHtml(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
 function fmtPrice(n) {
   if (typeof n !== 'number' || !Number.isFinite(n)) return 'N/A';
   const a = Math.abs(n);
@@ -930,31 +936,35 @@ async function runCycle() {
     return;
   }
 
-  const { scanned, scannedTokens = [], passed, rejected, cookinRejectDetails = [] } = scanResult;
+  const { scanned, scannedTokens = [], passed, rejected, rejectedDetails = [] } = scanResult;
   console.log(`[Scan] Scanned: ${scanned} | Passed: ${passed.length}`);
 
   if (passed.length === 0) {
     const scannedList = scannedTokens.length
-      ? scannedTokens.map((t) => `• ${t}`).join('\n')
+      ? scannedTokens.map((t) => `• ${escapeHtml(t)}`).join('\n')
       : '• (tidak ada data token)';
 
-    const cookinDetailsStr = cookinRejectDetails.length > 0
-      ? `\n<b>Detail Cookin Reject:</b>\n${cookinRejectDetails.map(d => `- ${d}`).join('\n')}`
+    const rejectedDetailsStr = rejectedDetails.length > 0
+      ? `\nDetail alasan reject:\n${rejectedDetails.map(d => `• ${escapeHtml(d)}`).join('\n')}`
       : '';
 
-    await sendTelegram(
-      `🔍 <b>DLMM Scan #${cycleCount}</b>\n` +
+    const scanMsg =
+      `🔍 DLMM Scan #${cycleCount}\n` +
       `Scanned: ${scanned} tokens | Lolos: 0\n\n` +
-      `<b>Token yang discan:</b>\n${scannedList}\n\n` +
-      `<b>Rejected:</b>\n` +
+      `Token yang discan:\n${scannedList}\n\n` +
+      `Rejected:\n` +
       `• MC terlalu besar: ${rejected.mc_too_large || 0}\n` +
       `• No pool Meteora: ${rejected.no_pool || 0}\n` +
       `• Pool baru (non-refundable): ${rejected.new_pool || 0}\n` +
       `• TVL terlalu besar: ${rejected.high_liquidity || 0}\n` +
+      `• TVL terlalu kecil: ${rejected.low_tvl || 0}\n` +
       `• Cookin reject: ${rejected.cookin_reject || 0}\n` +
-      `${cookinDetailsStr}\n\n` +
-      `😴 Belum ada token cocok...`
-    );
+      `• Blacklist: ${rejected.blacklisted || 0}\n` +
+      `• Meteora API error: ${rejected.meteora_api || 0}\n` +
+      `${rejectedDetailsStr}\n\n` +
+      `😴 Belum ada token cocok...`;
+
+    await sendTelegram(scanMsg);
     return;
   }
 
