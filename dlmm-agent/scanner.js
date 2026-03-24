@@ -19,10 +19,15 @@ const BLACKLIST_FILE = './blacklist.json';
 
 function loadBlacklist() {
   try {
-    if (!fs.existsSync(BLACKLIST_FILE)) return new Set();
+    if (!fs.existsSync(BLACKLIST_FILE)) return { mints: new Set(), symbols: new Set() };
     const data = JSON.parse(fs.readFileSync(BLACKLIST_FILE, 'utf8'));
-    return new Set(data.mints || []);
-  } catch { return new Set(); }
+    return {
+      mints: new Set(data.mints || []),
+      symbols: new Set((data.symbols || []).map(s => String(s).toUpperCase())),
+    };
+  } catch {
+    return { mints: new Set(), symbols: new Set() };
+  }
 }
 
 // Filter dari .env
@@ -124,10 +129,14 @@ export async function scanTokens() {
 
     // Filter blacklist — reject token yang di-blacklist manual
     const blacklist = loadBlacklist();
-    if (blacklist.has(mint)) {
+    const symbolUpper = String(symbol || '').toUpperCase();
+    if (blacklist.mints.has(mint) || blacklist.symbols.has(symbolUpper)) {
       console.log(`  ❌ REJECT: Token di-blacklist (${symbol})`);
       results.rejected.blacklisted = (results.rejected.blacklisted || 0) + 1;
-      pushRejectedDetail(symbol, mint, 'token di-blacklist');
+      const reason = blacklist.symbols.has(symbolUpper)
+        ? `symbol di-blacklist (${symbolUpper})`
+        : 'token di-blacklist';
+      pushRejectedDetail(symbol, mint, reason);
       continue;
     }
 
