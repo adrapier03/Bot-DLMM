@@ -740,12 +740,13 @@ async function monitorTick() {
           ...newPosData,
         });
 
+        const layer2Ok = !!newPosData.txHash2;
         await sendTelegram(
-          `🎯 <b>Re-Open Berhasil!</b>\n` +
+          `${layer2Ok ? '🎯 <b>Re-Open Berhasil!</b>' : '⚠️ <b>Re-Open Partial (Layer 2 gagal)</b>'}\n` +
           `Token: <b>${newPosData.symbol}</b>\n` +
           `Entry price baru: <b>${fmtPrice(newPosData.entryPrice)}</b>\n` +
           `Range: Bin ${newPosData.minBinId} → ${newPosData.maxBinId}\n` +
-          `Modal: <b>${newPosData.budgetSol} SOL</b>\n` +
+          `Modal efektif: <b>${fmtSol(newPosData.budgetSol)} SOL</b>${layer2Ok ? '' : ' (hanya Layer 1)'}\n` +
           `<a href="https://solscan.io/tx/${newPosData.txHash}">TX Layer 1</a>` +
           (newPosData.txHash2 ? ` | <a href="https://solscan.io/tx/${newPosData.txHash2}">TX Layer 2</a>` : '')
         );
@@ -1016,10 +1017,14 @@ async function runCycle() {
     return;
   }
 
-  // Update state with final data (including txHash2)
+  // Update state with final data (including txHash2/layer2 status/modal efektif)
   const finalState = loadState();
   if (finalState.activePosition) {
     finalState.activePosition.txHash2 = posData.txHash2;
+    finalState.activePosition.layer2Status = posData.layer2Status || (posData.txHash2 ? 'ok' : 'failed');
+    if (typeof posData.budgetSol === 'number' && Number.isFinite(posData.budgetSol)) {
+      finalState.activePosition.budgetSol = posData.budgetSol;
+    }
     finalState.activePosition.walletBalanceBeforeOpenSol = balanceSol;
     saveState(finalState);
   }

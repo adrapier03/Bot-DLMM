@@ -94,6 +94,7 @@ export async function openPosition(token) {
     budgetSol: BUDGET_SOL,
     txHash: txHash1,
     txHash2: null,
+    layer2Status: 'pending',
     openedAt: Date.now(),
     outOfRangeSince: null,
     oorDirection: null,
@@ -117,8 +118,13 @@ export async function openPosition(token) {
       skipPreflight: true, commitment: 'confirmed',
     });
     posData.txHash2 = txHash2;
+    posData.layer2Status = 'ok';
     console.log(`[Open] Layer 2 TX: ${txHash2}`);
   } catch (e) {
+    posData.layer2Status = 'failed';
+    // Modal efektif hanya layer1 (70%) jika layer2 gagal.
+    // Penting agar PnL tidak terlihat -30% palsu karena denominator tetap 1 SOL.
+    posData.budgetSol = Number((BUDGET_SOL * 0.7).toFixed(6));
     console.error('[Open] Layer 2 failed (position still valid):', e.message);
   }
 
