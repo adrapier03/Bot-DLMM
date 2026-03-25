@@ -91,7 +91,8 @@ export async function openPosition(token) {
     minBinId,
     maxBinId,
     isSolX,
-    budgetSol: BUDGET_SOL,
+    // Start as layer-1-only budget; akan jadi full jika layer2 sukses.
+    budgetSol: Number((BUDGET_SOL * 0.7).toFixed(6)),
     txHash: txHash1,
     txHash2: null,
     layer2Status: 'pending',
@@ -119,6 +120,7 @@ export async function openPosition(token) {
     });
     posData.txHash2 = txHash2;
     posData.layer2Status = 'ok';
+    posData.budgetSol = BUDGET_SOL;
     console.log(`[Open] Layer 2 TX: ${txHash2}`);
   } catch (e) {
     posData.layer2Status = 'failed';
@@ -178,8 +180,16 @@ export async function monitorPosition(state) {
   const tokenValueSol = tokenInPos * currentPrice;
   const totalValueSol = solInPos + tokenValueSol;
   const totalFeeSol   = feeSol + feeToken * currentPrice;
-  const pnlSol = (totalValueSol + totalFeeSol) - state.budgetSol;
-  const pnlPct = (pnlSol / state.budgetSol) * 100;
+
+  // Guard partial-open: jika layer2 gagal/belum ada, denominator harus modal efektif 70%
+  // agar tidak kebaca -30% palsu.
+  let effectiveBudgetSol = Number(state.budgetSol || BUDGET_SOL);
+  if ((!state.txHash2 || state.layer2Status === 'failed') && effectiveBudgetSol > (BUDGET_SOL * 0.71)) {
+    effectiveBudgetSol = Number((BUDGET_SOL * 0.7).toFixed(6));
+  }
+
+  const pnlSol = (totalValueSol + totalFeeSol) - effectiveBudgetSol;
+  const pnlPct = (pnlSol / effectiveBudgetSol) * 100;
 
   console.log(`  [Monitor] solInPos=${solInPos.toFixed(6)} tokenInPos=${tokenInPos.toFixed(6)} tokenValue=${tokenValueSol.toFixed(6)} totalValue=${totalValueSol.toFixed(6)} pnl=${pnlPct.toFixed(2)}%`);
 
